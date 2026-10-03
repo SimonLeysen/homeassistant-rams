@@ -1,0 +1,54 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Rams Home",
+        "description": "Kies wat het home panel toont. Laat ruimtes leeg om alle ruimtes te tonen.",
+        "data": {
+          "title": "Titel in de zijbalk",
+          "rooms": "Ruimtes",
+          "weather_entity": "Weer",
+          "persons": "Personen",
+          "alarm_entity": "Alarmsysteem"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Rams Home is al ingesteld."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Rams Home",
+        "description": "Kies wat het home panel toont. Laat ruimtes leeg om alle ruimtes te tonen.",
+        "data": {
+          "title": "Titel in de zijbalk",
+          "rooms": "Ruimtes",
+          "weather_entity": "Weer",
+          "persons": "Personen",
+          "alarm_entity": "Alarmsysteem"
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "house_mode": {
+        "name": "Huismodus",
+        "state": {
+          "home": "Thuis",
+          "away": "Afwezig",
+          "sleep": "Slapen",
+          "holiday": "Vakantie"
+        }
+      }
+    }
+  },
+  "services": {
+    "all_off": {
+      "name": "Alles uit",
+      "description": "Schakelt alle lampen uit en pauzeert alle spelende mediaspelers. Verwarming en beveiliging blijven ongewijzigd."
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Rams Home",
+        "description": "Choose what the home panel shows. Leave rooms empty to show every area.",
+        "data": {
+          "title": "Sidebar title",
+          "rooms": "Rooms",
+          "weather_entity": "Weather",
+          "persons": "People",
+          "alarm_entity": "Alarm system"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Rams Home is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Rams Home",
+        "description": "Choose what the home panel shows. Leave rooms empty to show every area.",
+        "data": {
+          "title": "Sidebar title",
+          "rooms": "Rooms",
+          "weather_entity": "Weather",
+          "persons": "People",
+          "alarm_entity": "Alarm system"
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "house_mode": {
+        "name": "House mode",
+        "state": {
+          "home": "Home",
+          "away": "Away",
+          "sleep": "Sleep",
+          "holiday": "Holiday"
+        }
+      }
+    }
+  },
+  "services": {
+    "all_off": {
+      "name": "Everything off",
+      "description": "Turns off all lights and pauses every playing media player. Heating and security stay as they are."
+    }
+  }
+}
