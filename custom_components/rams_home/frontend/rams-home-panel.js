@@ -208,7 +208,16 @@ class RamsHomePanel extends HTMLElement {
     return ids.filter((id) => areas[id]).map((id) => ({ id, name: areas[id].name }));
   }
 
-  _lightsIn(area) { return this._ids("light").filter((id) => this._areaOf(id) === area); }
+  // A light group (a Hue room or zone, or a light group helper) controls lamps that are
+  // already listed on their own, so it is left out to avoid counting them twice.
+  _isGroup(id) {
+    const st = this._hass.states[id];
+    if (!st) return false;
+    const a = st.attributes;
+    return a.is_hue_group === true || (Array.isArray(a.entity_id) && a.entity_id.length > 0);
+  }
+
+  _lightsIn(area) { return this._ids("light").filter((id) => this._areaOf(id) === area && !this._isGroup(id)); }
   _climateIn(area) { return this._ids("climate").find((id) => this._areaOf(id) === area); }
 
   _weatherId() {
@@ -515,7 +524,7 @@ class RamsHomePanel extends HTMLElement {
   }
 
   _offCard() {
-    const lights = this._ids("light").filter((id) => !(this._hass.states[id].attributes.entity_id));
+    const lights = this._ids("light").filter((id) => !this._isGroup(id));
     lights.forEach((id) => this._st(id));
     const on = lights.filter((id) => this._hass.states[id].state === "on");
     const rooms = new Set(on.map((id) => this._areaOf(id)).filter(Boolean)).size;
@@ -628,7 +637,7 @@ class RamsHomePanel extends HTMLElement {
       if (!ids.length) return "";
       return `<section class="card list"><div class="cardtop"><span class="eyebrow">${esc(r.name)}</span><button class="link" data-act="room-off" data-id="${esc(r.id)}">All off</button></div>${ids.map((i) => this._lightRow(i)).join("")}</section>`;
     }).join("");
-    const other = this._ids("light").filter((i) => !assigned.has(i) && !this._areaOf(i));
+    const other = this._ids("light").filter((i) => !assigned.has(i) && !this._areaOf(i) && !this._isGroup(i));
     const otherCard = other.length ? `<section class="card list"><div class="cardtop"><span class="eyebrow">Not assigned to a room</span></div>${other.map((i) => this._lightRow(i)).join("")}</section>` : "";
     return `<h2 class="viewtitle">Lights</h2><div class="grid">${cards}${otherCard}</div>`;
   }
