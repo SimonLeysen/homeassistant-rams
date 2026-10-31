@@ -83,6 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "weather": options.get(CONF_WEATHER),
             "persons": options.get(CONF_PERSONS, []),
             "alarm": options.get(CONF_ALARM),
+            "version": integration.version,
         },
     )
 

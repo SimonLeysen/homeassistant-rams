@@ -3,10 +3,11 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.1.3";
-// Heating: below COMFORT_MIN a target counts as frost protection; COMFORT_DEFAULT is the lowest target heating starts at.
+const RAMS_VERSION = "0.2.0";
+// Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
-const COMFORT_DEFAULT = 19;
+// Target steps for the plus and minus buttons, whatever step the thermostat reports.
+const TEMP_STEP = 0.5;
 
 const ICONS = {
   home: '<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
@@ -107,6 +108,18 @@ class RamsHomePanel extends HTMLElement {
   }
 
   set panel(panel) {
+    // The app can keep an old copy of this file after an update. When the installed
+    // version differs from the running one, reload once to fetch the new code.
+    const want = panel && panel.config && panel.config.version;
+    if (want && String(want) !== RAMS_VERSION) {
+      let tried = null;
+      try { tried = sessionStorage.getItem("rams_home_reloaded"); } catch (e) { /* ignore */ }
+      if (tried !== String(want)) {
+        try { sessionStorage.setItem("rams_home_reloaded", String(want)); } catch (e) { /* ignore */ }
+        location.reload();
+        return;
+      }
+    }
     const prev = this._hass ? this._weatherId() : null;
     this._panel = panel;
     if (this._hass && this._subs && this._weatherId() !== prev) {
@@ -288,24 +301,18 @@ class RamsHomePanel extends HTMLElement {
       case "room-off": this._call("light", "turn_off", { entity_id: this._lightsIn(id) }); return;
       case "temp": {
         const st = this._hass.states[id];
-        if (!st) return;
-        const a = st.attributes;
-        const step = this._tempStep(st);
-        // From off or frost protection, start from a comfortable target rather than 5°.
-        const cur = this._heating(st) ? Number(a.temperature) : this._comfortTarget(st);
-        const next = this._clampTemp(st, Math.round((cur + step * Number(val)) / step) * step);
+        if (!st || !this._heating(st)) return;
+        const next = this._clampTemp(st, this._roundStep(Number(st.attributes.temperature)) + TEMP_STEP * Number(val));
         this._call("climate", "set_temperature", { entity_id: id, temperature: next, hvac_mode: "heat" });
         return;
       }
-      case "hvac": {
+      case "heat-on": {
         const st = this._hass.states[id];
-        if (val === "heat" && st && !this._heating(st)) {
-          this._call("climate", "set_temperature", { entity_id: id, temperature: this._comfortTarget(st), hvac_mode: "heat" });
-        } else {
-          this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: val });
-        }
+        if (!st) return;
+        this._call("climate", "set_temperature", { entity_id: id, temperature: this._startTarget(st), hvac_mode: "heat" });
         return;
       }
+      case "heat-off": this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: "off" }); return;
       case "alarm": this._call("alarm_control_panel", val, { entity_id: id }); return;
       case "more": this._moreInfo(id); return;
       case "dismiss": this._call("persistent_notification", "dismiss", { notification_id: id }); return;
@@ -619,23 +626,21 @@ class RamsHomePanel extends HTMLElement {
       </div>`;
   }
 
-  /* Heating helpers. Some thermostats (Tado) report steps of 0.1°, far too fine for a button. */
-  _tempStep(st) { return Math.max(0.5, Number(st.attributes.target_temp_step) || 0.5); }
+  /* Heating helpers */
+  _roundStep(t) { return Math.round(t / TEMP_STEP) * TEMP_STEP; }
   _clampTemp(st, t) {
     const a = st.attributes;
     return Math.min(a.max_temp ?? 30, Math.max(a.min_temp ?? 5, Math.round(t * 10) / 10));
   }
-  // Heating towards a real target, not off and not held at frost protection.
+  // On means heating towards a real target: not off, not on a schedule, not held at frost protection.
   _heating(st) {
     const t = Number(st.attributes.temperature);
-    return st.state !== "off" && !isNaN(t) && t >= COMFORT_MIN;
+    return st.state === "heat" && !isNaN(t) && t >= COMFORT_MIN;
   }
-  // A sensible target when heating starts: the room's current temperature, at least 19°.
-  _comfortTarget(st) {
-    const step = this._tempStep(st);
+  // Switching on starts from the room temperature right now, rounded up to the next half degree.
+  _startTarget(st) {
     const now = Number(st.attributes.current_temperature);
-    const base = isNaN(now) ? COMFORT_DEFAULT : Math.max(COMFORT_DEFAULT, Math.round(now / step) * step);
-    return this._clampTemp(st, base);
+    return this._clampTemp(st, isNaN(now) ? 20 : Math.ceil(now / TEMP_STEP - 1e-9) * TEMP_STEP);
   }
 
   // "Europe/Brussels" becomes "Central European Time"; falls back to the raw zone name.
@@ -659,24 +664,28 @@ class RamsHomePanel extends HTMLElement {
       </div>`;
     }
     const a = st.attributes;
-    // Schedule (auto) is left out on purpose: only Off and Heat are offered.
-    const modes = (a.hvac_modes || []).filter((m) => m !== "auto");
-    const label = { off: "Off", heat: "Heat", cool: "Cool", heat_cool: "Auto", dry: "Dry", fan_only: "Fan" };
+    const on = this._heating(st);
+    const name = esc(this._name(id));
     return `
       <div class="climate">
+        ${a.hvac_action === "heating" ? `<span class="heatdot" role="img" aria-label="Heating now" title="Heating now"></span>` : ""}
         <div class="cl-top">
           <div class="stack tight"><span class="caption">Now</span><span class="huge">${this._temp(a.current_temperature)}</span></div>
           ${a.current_humidity !== undefined ? `<span class="caption">Humidity ${Math.round(a.current_humidity)}%</span>` : ""}
         </div>
+        <div class="seg" role="group" aria-label="Heating ${name}">
+          <button class="segbtn ${on ? "" : "sel"}" data-act="heat-off" data-id="${esc(id)}" aria-pressed="${!on}">Off</button>
+          <button class="segbtn ${on ? "sel" : ""}" data-act="heat-on" data-id="${esc(id)}" aria-pressed="${on}">On</button>
+        </div>
+        ${on ? `
         <div class="cl-row">
           <span class="lname">Target</span>
           <span class="stepper">
-            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="-1" aria-label="Lower target temperature">${icon("minus", 20)}</button>
-            <span class="target">${st.state === "off" ? "Off" : this._temp(a.temperature)}</span>
-            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="1" aria-label="Raise target temperature">${icon("plus", 20)}</button>
+            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="-1" aria-label="Lower target to ${this._temp(this._clampTemp(st, this._roundStep(Number(a.temperature)) - TEMP_STEP))}">${icon("minus", 20)}</button>
+            <span class="target" aria-live="polite">${this._temp(a.temperature)}</span>
+            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="1" aria-label="Raise target to ${this._temp(this._clampTemp(st, this._roundStep(Number(a.temperature)) + TEMP_STEP))}">${icon("plus", 20)}</button>
           </span>
-        </div>
-        ${modes.length > 1 ? `<div class="chips">${modes.map((m) => `<button class="chip ${st.state === m ? "pressed" : ""}" data-act="hvac" data-id="${esc(id)}" data-val="${esc(m)}" aria-pressed="${st.state === m}">${label[m] || esc(m)}</button>`).join("")}</div>` : ""}
+        </div>` : ""}
       </div>`;
   }
 
@@ -924,10 +933,14 @@ h1{font-size:32px;letter-spacing:-.01em}
 .switch.on span{transform:translateX(24px)}
 input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px}
 .climate.offline{gap:6px}
-.climate{background:var(--raised);border-radius:24px;padding:20px;display:flex;flex-direction:column;gap:16px;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06)}
+.climate{position:relative;background:var(--raised);border-radius:24px;padding:20px;display:flex;flex-direction:column;gap:16px;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06)}
 .cl-top{display:flex;justify-content:space-between;align-items:flex-end}
 .cl-row{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line2);padding-top:16px}
 .stepper{display:flex;align-items:center;gap:14px}
+.heatdot{position:absolute;top:16px;right:16px;width:10px;height:10px;border-radius:5px;background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border-radius:16px;background:var(--well);box-shadow:inset 0 2px 5px rgba(var(--sh),.10)}
+.segbtn{height:44px;border-radius:12px;font-size:15px;font-weight:500;color:var(--ink2);transition:background-color .2s,box-shadow .2s,color .2s}
+.segbtn.sel{background:var(--raised);color:var(--ink);box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.12),0 4px 10px rgba(var(--sh),.10)}
 .sq{width:48px;height:48px;border-radius:16px;background:var(--sunk);display:flex;align-items:center;justify-content:center}
 .target{font-size:22px;font-weight:500;min-width:64px;text-align:center}
 .chips{display:flex;gap:8px;flex-wrap:wrap}
