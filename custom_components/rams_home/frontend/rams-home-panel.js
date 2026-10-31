@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.1.0";
+const RAMS_VERSION = "0.1.2";
 
 const ICONS = {
   home: '<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
@@ -357,7 +357,7 @@ class RamsHomePanel extends HTMLElement {
   _header() {
     const now = new Date();
     const hr = now.getHours();
-    const greeting = hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+    const greeting = hr < 5 ? "Good night" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
     const date = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
     const home = this._persons().filter((p) => p.state === "home");
     const count = Object.keys(this._notifications).length;
@@ -386,10 +386,10 @@ class RamsHomePanel extends HTMLElement {
           <span class="presence">${presence}</span>
           <span class="avatars">${avatars}</span>
           <span class="divider"></span>
-          <button class="iconbtn" data-act="notifications" aria-label="Notifications, ${count} unread">
-            ${icon("bell", 22)}${count ? `<span class="dot"></span>` : ""}
-          </button>
         </div>
+        <button class="iconbtn bell" data-act="notifications" aria-label="Notifications, ${count} unread">
+          ${icon("bell", 22)}${count ? `<span class="dot"></span>` : ""}
+        </button>
       </header>`;
   }
 
@@ -435,7 +435,7 @@ class RamsHomePanel extends HTMLElement {
         <section class="card clockcard" aria-label="Clock">
           <div class="cardtop"><span class="eyebrow">${esc(this._hass.config.location_name || "Home")}</span><span id="digital" class="caption"></span></div>
           ${this._clockSvg()}
-          <div class="caption">${esc(this._hass.config.time_zone || "")}</div>
+          <div class="caption tzname">${esc(this._tzName())}</div>
         </section>
         ${this._modeCard()}
         ${this._offCard()}
@@ -501,9 +501,14 @@ class RamsHomePanel extends HTMLElement {
     const cur = st ? st.state : null;
     const mode = MODES.find((m) => m.id === cur);
     let since = "";
-    if (st) {
-      const mins = Math.round((Date.now() - new Date(st.last_changed).getTime()) / 60000);
-      since = mins < 1 ? "Changed just now" : mins < 60 ? `Since ${mins} min ago` : mins < 1440 ? `Since ${Math.round(mins / 60)} h ago` : `Since ${Math.round(mins / 1440)} days ago`;
+    const changed = st ? new Date(st.last_changed).getTime() : NaN;
+    if (!isNaN(changed)) {
+      const mins = Math.max(0, Math.round((Date.now() - changed) / 60000));
+      const hrs = Math.round(mins / 60), days = Math.round(mins / 1440);
+      since = mins < 1 ? "Changed just now"
+        : mins < 60 ? `Changed ${mins} min ago`
+        : mins < 1440 ? `Changed ${hrs} ${hrs === 1 ? "hour" : "hours"} ago`
+        : `Changed ${days} ${days === 1 ? "day" : "days"} ago`;
     }
     return `
       <section class="card modecard" aria-label="House mode">
@@ -602,9 +607,26 @@ class RamsHomePanel extends HTMLElement {
       </div>`;
   }
 
+  // "Europe/Brussels" becomes "Central European Time"; falls back to the raw zone name.
+  _tzName() {
+    const tz = this._hass.config.time_zone || "";
+    try {
+      const part = new Intl.DateTimeFormat("en-GB", { timeZone: tz, timeZoneName: "longGeneric" })
+        .formatToParts(new Date()).find((p) => p.type === "timeZoneName");
+      return (part && part.value) || tz;
+    } catch (e) { return tz; }
+  }
+
   _climateBlock(id) {
     const st = this._st(id);
     if (!st) return "";
+    if (st.state === "unavailable" || st.state === "unknown") {
+      return `
+      <div class="climate offline">
+        <span class="lname">Not responding</span>
+        <span class="caption">${esc(this._name(id))} is offline, so temperature and target cannot be shown or changed.</span>
+      </div>`;
+    }
     const a = st.attributes;
     const modes = a.hvac_modes || [];
     const label = { off: "Off", heat: "Heat", auto: "Schedule", cool: "Cool", heat_cool: "Auto", dry: "Dry", fan_only: "Fan" };
@@ -771,7 +793,7 @@ h1{font-size:32px;letter-spacing:-.01em}
 .shell{display:grid;grid-template-columns:80px minmax(0,1fr);grid-template-areas:". header" "rail main" ". rooms";column-gap:32px;row-gap:28px;padding:40px 40px 40px 32px;max-width:1600px;margin:0 auto}
 .header{grid-area:header;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
 .hello{display:flex;align-items:center;gap:12px}
-.tools{display:flex;align-items:center;gap:12px}
+.tools{display:flex;align-items:center;gap:12px;margin-left:auto}
 .presence{font-size:15px;color:var(--ink2);margin-left:8px}
 .avatars{display:flex;gap:8px}
 .avatar{width:48px;height:48px;border-radius:24px;background:var(--raised);box-shadow:var(--raise);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;overflow:hidden}
@@ -869,6 +891,7 @@ h1{font-size:32px;letter-spacing:-.01em}
 .switch.on{background:var(--accent)}
 .switch.on span{transform:translateX(24px)}
 input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px}
+.climate.offline{gap:6px}
 .climate{background:var(--raised);border-radius:24px;padding:20px;display:flex;flex-direction:column;gap:16px;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06)}
 .cl-top{display:flex;justify-content:space-between;align-items:flex-end}
 .cl-row{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line2);padding-top:16px}
@@ -902,13 +925,14 @@ input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px}
 @container rams (max-width: 760px){
   .shell{grid-template-columns:minmax(0,1fr);grid-template-areas:"header" "rooms" "main";padding:20px 16px 108px;row-gap:16px}
   h1{font-size:26px}
-  .tools{width:100%;justify-content:space-between;gap:8px}
-  .presence{order:2;margin:0;font-size:14px}
+  .header{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"hello bell" "tools tools";align-items:start;row-gap:16px;column-gap:12px}
+  .hello{grid-area:hello;min-width:0}
+  .bell{grid-area:bell;width:44px;height:44px}
+  .tools{grid-area:tools;width:100%;margin-left:0;justify-content:flex-start;gap:8px}
+  .presence{order:2;margin:0 auto 0 4px;font-size:14px}
   .avatars{order:1}.avatar{width:40px;height:40px;font-size:14px}
   .themeswitch{order:3;width:84px;height:44px}.themeswitch .slot{width:42px;height:44px}.themeswitch .knob{width:36px;height:36px}.themeswitch.on .knob{transform:translateX(40px)}
   .divider{display:none}
-  .header .iconbtn:not(.menu){position:absolute;top:20px;right:16px;width:44px;height:44px}
-  .header{position:relative}
   .rail{position:fixed;left:0;right:0;bottom:0;top:auto;min-height:0;flex-direction:row;border-radius:0;padding:6px 8px 22px;gap:0;z-index:5;box-shadow:inset 0 1px 0 var(--line2),0 -8px 24px rgba(var(--sh),.05)}
   .navbtn{flex:1;width:auto;height:56px;flex-direction:column;gap:4px;background:none !important;box-shadow:none !important;color:var(--ink3)}
   .navbtn.last{margin-top:0}
@@ -916,9 +940,10 @@ input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px}
   .navbtn.active{color:var(--ink)}
   .navbtn.active .navicon{background:var(--raised);box-shadow:var(--raise);color:var(--accent)}
   .navlabel{display:block;font-size:11px;font-weight:500}
-  .rooms{display:flex;overflow-x:auto;margin:0 -16px;padding:2px 16px 10px;gap:10px;scrollbar-width:none;scroll-snap-type:x proximity}
+  .rooms{display:flex;overflow-x:auto;margin:0 -16px;padding:2px 16px 10px;gap:10px;scrollbar-width:none;scroll-snap-type:x proximity;scroll-padding-inline:16px}
   .rooms::-webkit-scrollbar{display:none}
-  .room{flex:0 0 168px;min-height:0;padding:14px 16px;border-radius:20px;scroll-snap-align:start}
+  .room{flex:0 0 168px;min-height:0;padding:14px 16px;border-radius:20px;scroll-snap-align:start;scroll-margin-inline-start:16px}
+  .tzname{display:none}
   .roomname{font-size:15px}.roomstatus{font-size:12px;white-space:nowrap}
   .home{grid-template-columns:minmax(0,1fr);grid-template-areas:"clock" "mode" "off" "wx";gap:16px}
   .card{padding:20px;border-radius:24px}
