@@ -3,7 +3,10 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.1.2";
+const RAMS_VERSION = "0.1.3";
+// Heating: below COMFORT_MIN a target counts as frost protection; COMFORT_DEFAULT is the lowest target heating starts at.
+const COMFORT_MIN = 12;
+const COMFORT_DEFAULT = 19;
 
 const ICONS = {
   home: '<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
@@ -286,14 +289,23 @@ class RamsHomePanel extends HTMLElement {
       case "temp": {
         const st = this._hass.states[id];
         if (!st) return;
-        const step = st.attributes.target_temp_step || 0.5;
-        const cur = Number(st.attributes.temperature ?? st.attributes.current_temperature ?? 20);
-        const min = st.attributes.min_temp ?? 5, max = st.attributes.max_temp ?? 30;
-        const next = Math.min(max, Math.max(min, Math.round((cur + step * Number(val)) / step) * step));
-        this._call("climate", "set_temperature", { entity_id: id, temperature: next });
+        const a = st.attributes;
+        const step = this._tempStep(st);
+        // From off or frost protection, start from a comfortable target rather than 5°.
+        const cur = this._heating(st) ? Number(a.temperature) : this._comfortTarget(st);
+        const next = this._clampTemp(st, Math.round((cur + step * Number(val)) / step) * step);
+        this._call("climate", "set_temperature", { entity_id: id, temperature: next, hvac_mode: "heat" });
         return;
       }
-      case "hvac": this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: val }); return;
+      case "hvac": {
+        const st = this._hass.states[id];
+        if (val === "heat" && st && !this._heating(st)) {
+          this._call("climate", "set_temperature", { entity_id: id, temperature: this._comfortTarget(st), hvac_mode: "heat" });
+        } else {
+          this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: val });
+        }
+        return;
+      }
       case "alarm": this._call("alarm_control_panel", val, { entity_id: id }); return;
       case "more": this._moreInfo(id); return;
       case "dismiss": this._call("persistent_notification", "dismiss", { notification_id: id }); return;
@@ -607,6 +619,25 @@ class RamsHomePanel extends HTMLElement {
       </div>`;
   }
 
+  /* Heating helpers. Some thermostats (Tado) report steps of 0.1°, far too fine for a button. */
+  _tempStep(st) { return Math.max(0.5, Number(st.attributes.target_temp_step) || 0.5); }
+  _clampTemp(st, t) {
+    const a = st.attributes;
+    return Math.min(a.max_temp ?? 30, Math.max(a.min_temp ?? 5, Math.round(t * 10) / 10));
+  }
+  // Heating towards a real target, not off and not held at frost protection.
+  _heating(st) {
+    const t = Number(st.attributes.temperature);
+    return st.state !== "off" && !isNaN(t) && t >= COMFORT_MIN;
+  }
+  // A sensible target when heating starts: the room's current temperature, at least 19°.
+  _comfortTarget(st) {
+    const step = this._tempStep(st);
+    const now = Number(st.attributes.current_temperature);
+    const base = isNaN(now) ? COMFORT_DEFAULT : Math.max(COMFORT_DEFAULT, Math.round(now / step) * step);
+    return this._clampTemp(st, base);
+  }
+
   // "Europe/Brussels" becomes "Central European Time"; falls back to the raw zone name.
   _tzName() {
     const tz = this._hass.config.time_zone || "";
@@ -628,8 +659,9 @@ class RamsHomePanel extends HTMLElement {
       </div>`;
     }
     const a = st.attributes;
-    const modes = a.hvac_modes || [];
-    const label = { off: "Off", heat: "Heat", auto: "Schedule", cool: "Cool", heat_cool: "Auto", dry: "Dry", fan_only: "Fan" };
+    // Schedule (auto) is left out on purpose: only Off and Heat are offered.
+    const modes = (a.hvac_modes || []).filter((m) => m !== "auto");
+    const label = { off: "Off", heat: "Heat", cool: "Cool", heat_cool: "Auto", dry: "Dry", fan_only: "Fan" };
     return `
       <div class="climate">
         <div class="cl-top">
