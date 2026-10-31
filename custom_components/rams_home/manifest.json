@@ -1,13 +1,13 @@
 {
   "domain": "rams_home",
   "name": "Rams Home",
-  "codeowners": ["@YOUR_GITHUB_USERNAME"],
+  "codeowners": ["@SimonLeysen"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "panel_custom"],
-  "documentation": "https://github.com/YOUR_GITHUB_USERNAME/rams-home",
+  "documentation": "https://github.com/SimonLeysen/homeassistant-rams",
   "integration_type": "service",
   "iot_class": "calculated",
-  "issue_tracker": "https://github.com/YOUR_GITHUB_USERNAME/rams-home/issues",
+  "issue_tracker": "https://github.com/SimonLeysen/homeassistant-rams/issues",
   "requirements": [],
   "single_config_entry": true,
   "version": "0.1.0"
