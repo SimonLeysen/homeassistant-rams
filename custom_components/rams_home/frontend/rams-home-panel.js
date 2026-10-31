@@ -3,11 +3,13 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.2.0";
+const RAMS_VERSION = "0.2.1";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
 const TEMP_STEP = 0.5;
+const SEND_DELAY = 1500;   // ms of quiet after the last tap before the target goes to the device
+const CONFIRM_TIMEOUT = 30000;
 
 const ICONS = {
   home: '<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
@@ -88,6 +90,7 @@ class RamsHomePanel extends HTMLElement {
     this._forecast = null;
     this._notifications = {};
     this._dragging = false;
+    this._pend = {};   // climate entity -> { on, temp, timer, sent, guard }
   }
 
   /* ---------- Home Assistant hooks ---------- */
@@ -301,18 +304,25 @@ class RamsHomePanel extends HTMLElement {
       case "room-off": this._call("light", "turn_off", { entity_id: this._lightsIn(id) }); return;
       case "temp": {
         const st = this._hass.states[id];
-        if (!st || !this._heating(st)) return;
-        const next = this._clampTemp(st, this._roundStep(Number(st.attributes.temperature)) + TEMP_STEP * Number(val));
-        this._call("climate", "set_temperature", { entity_id: id, temperature: next, hvac_mode: "heat" });
-        return;
+        const v = this._view(id, st);
+        if (!st || !v.on) return;
+        this._queueTarget(id, this._clampTemp(st, this._roundStep(v.temp) + TEMP_STEP * Number(val)));
+        break;
       }
       case "heat-on": {
         const st = this._hass.states[id];
-        if (!st) return;
-        this._call("climate", "set_temperature", { entity_id: id, temperature: this._startTarget(st), hvac_mode: "heat" });
-        return;
+        if (!st || this._view(id, st).on) return;
+        this._queueTarget(id, this._startTarget(st));
+        break;
       }
-      case "heat-off": this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: "off" }); return;
+      case "heat-off": {
+        this._dropPend(id);
+        const p = this._pend[id] = { on: false, sent: true };
+        this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: "off" })
+          .catch(() => { if (this._pend[id] === p) { this._dropPend(id); this._schedule(); } });
+        p.guard = setTimeout(() => { if (this._pend[id] === p) { delete this._pend[id]; this._schedule(); } }, CONFIRM_TIMEOUT);
+        break;
+      }
       case "alarm": this._call("alarm_control_panel", val, { entity_id: id }); return;
       case "more": this._moreInfo(id); return;
       case "dismiss": this._call("persistent_notification", "dismiss", { notification_id: id }); return;
@@ -643,6 +653,44 @@ class RamsHomePanel extends HTMLElement {
     return this._clampTemp(st, isNaN(now) ? 20 : Math.ceil(now / TEMP_STEP - 1e-9) * TEMP_STEP);
   }
 
+  /* Heating changes show on screen at once. The target only goes to the device after
+     SEND_DELAY of quiet, and the screen keeps the chosen value until the device confirms it. */
+  _queueTarget(id, temp) {
+    const old = this._pend[id];
+    if (old) { clearTimeout(old.timer); clearTimeout(old.guard); }
+    const p = this._pend[id] = { on: true, temp, sent: false };
+    p.timer = setTimeout(() => this._sendTarget(id, p), SEND_DELAY);
+  }
+  _sendTarget(id, p) {
+    if (this._pend[id] !== p) return;
+    p.timer = null;
+    p.sent = true;
+    this._schedule();
+    this._call("climate", "set_temperature", { entity_id: id, temperature: p.temp, hvac_mode: "heat" })
+      .catch(() => { if (this._pend[id] === p) { this._dropPend(id); this._schedule(); } });
+    p.guard = setTimeout(() => { if (this._pend[id] === p) { delete this._pend[id]; this._schedule(); } }, CONFIRM_TIMEOUT);
+  }
+  _dropPend(id) {
+    const p = this._pend[id];
+    if (!p) return;
+    clearTimeout(p.timer); clearTimeout(p.guard);
+    delete this._pend[id];
+  }
+  // What the card shows: the pending choice if there is one, otherwise the device state.
+  // A sent change is cleared as soon as the device reports it.
+  _view(id, st) {
+    const p = this._pend[id];
+    if (p && p.sent && st) {
+      const done = p.on
+        ? st.state === "heat" && Math.abs(Number(st.attributes.temperature) - p.temp) < 0.05
+        : !this._heating(st);
+      if (done) this._dropPend(id);
+    }
+    const q = this._pend[id];
+    if (q) return { on: q.on, temp: q.on ? q.temp : null, pending: true, sending: q.sent };
+    return { on: !!st && this._heating(st), temp: st ? Number(st.attributes.temperature) : null, pending: false, sending: false };
+  }
+
   // "Europe/Brussels" becomes "Central European Time"; falls back to the raw zone name.
   _tzName() {
     const tz = this._hass.config.time_zone || "";
@@ -664,11 +712,12 @@ class RamsHomePanel extends HTMLElement {
       </div>`;
     }
     const a = st.attributes;
-    const on = this._heating(st);
+    const v = this._view(id, st);
+    const on = v.on;
     const name = esc(this._name(id));
     return `
       <div class="climate">
-        ${a.hvac_action === "heating" ? `<span class="heatdot" role="img" aria-label="Heating now" title="Heating now"></span>` : ""}
+        ${!v.pending && on && a.hvac_action === "heating" ? `<span class="heatdot" role="img" aria-label="Heating now" title="Heating now"></span>` : ""}
         <div class="cl-top">
           <div class="stack tight"><span class="caption">Now</span><span class="huge">${this._temp(a.current_temperature)}</span></div>
           ${a.current_humidity !== undefined ? `<span class="caption">Humidity ${Math.round(a.current_humidity)}%</span>` : ""}
@@ -679,11 +728,11 @@ class RamsHomePanel extends HTMLElement {
         </div>
         ${on ? `
         <div class="cl-row">
-          <span class="lname">Target</span>
+          <span class="stack tight"><span class="lname">Target</span>${v.sending ? `<span class="caption">Sending</span>` : ""}</span>
           <span class="stepper">
-            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="-1" aria-label="Lower target to ${this._temp(this._clampTemp(st, this._roundStep(Number(a.temperature)) - TEMP_STEP))}">${icon("minus", 20)}</button>
-            <span class="target" aria-live="polite">${this._temp(a.temperature)}</span>
-            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="1" aria-label="Raise target to ${this._temp(this._clampTemp(st, this._roundStep(Number(a.temperature)) + TEMP_STEP))}">${icon("plus", 20)}</button>
+            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="-1" aria-label="Lower target to ${this._temp(this._clampTemp(st, this._roundStep(v.temp) - TEMP_STEP))}">${icon("minus", 20)}</button>
+            <span class="target" aria-live="polite">${this._temp(v.temp)}</span>
+            <button class="sq" data-act="temp" data-id="${esc(id)}" data-val="1" aria-label="Raise target to ${this._temp(this._clampTemp(st, this._roundStep(v.temp) + TEMP_STEP))}">${icon("plus", 20)}</button>
           </span>
         </div>` : ""}
       </div>`;
