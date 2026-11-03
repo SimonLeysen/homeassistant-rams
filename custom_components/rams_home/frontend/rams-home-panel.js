@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.4.0";
+const RAMS_VERSION = "0.4.1";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -261,13 +261,17 @@ class RamsHomePanel extends HTMLElement {
     return ids.filter((id) => areas[id]).map((id) => ({ id, name: areas[id].name }));
   }
 
-  // A light group (a Hue room or zone, or a light group helper) controls lamps that are
-  // already listed on their own, so it is left out to avoid counting them twice.
+  // A Hue room or zone, or a group whose lamps are listed on their own, is left out so
+  // nothing is counted twice. A group helper that hides its lamps (Hallway, Cloakroom,
+  // Bathroom Mirror) stands in for them and is shown as one light.
   _isGroup(id) {
     const st = this._hass.states[id];
     if (!st) return false;
     const a = st.attributes;
-    return a.is_hue_group === true || (Array.isArray(a.entity_id) && a.entity_id.length > 0);
+    if (a.is_hue_group === true) return true;
+    if (!Array.isArray(a.entity_id) || !a.entity_id.length) return false;
+    const ents = this._hass.entities || {};
+    return !a.entity_id.some((m) => ents[m] && ents[m].hidden);
   }
 
   _lightsIn(area) { return this._ids("light").filter((id) => this._areaOf(id) === area && !this._isGroup(id)); }
@@ -337,7 +341,13 @@ class RamsHomePanel extends HTMLElement {
       case "notifications": ui.sheet = "notifications"; break;
       case "close": ui.sheet = null; break;
       case "toggle": this._call("light", "toggle", { entity_id: id }); return;
-      case "room-off": this._call("light", "turn_off", { entity_id: this._lightsIn(id) }); return;
+      case "room-toggle": {
+        const ids = this._lightsIn(id).filter((l) => this._hass.states[l] && this._hass.states[l].state !== "unavailable");
+        if (!ids.length) return;
+        const anyOn = ids.some((l) => this._hass.states[l].state === "on");
+        this._call("light", anyOn ? "turn_off" : "turn_on", { entity_id: ids });
+        return;
+      }
       case "temp": {
         const st = this._hass.states[id];
         const v = this._view(id, st);
@@ -679,16 +689,24 @@ class RamsHomePanel extends HTMLElement {
     const st = this._st(id);
     if (!st) return "";
     const on = st.state === "on";
-    const unavailable = st.state === "unavailable";
+    const unavailable = st.state === "unavailable" || st.state === "unknown";
     const dim = this._dimmable(st);
+    const name = esc(this._name(id));
+    const status = unavailable ? "Unavailable" : on ? (dim ? this._pct(st) + "%" : "On") : "Off";
     return `
-      <div class="lightrow">
-        <div class="lr-top">
-          <div class="stack tight"><span class="lname">${esc(this._name(id))}</span><span class="caption">${unavailable ? "Unavailable" : on ? (dim ? this._pct(st) + "% brightness" : "On") : "Off"}</span></div>
-          <button class="switch ${on ? "on" : ""}" data-act="toggle" data-id="${esc(id)}" aria-pressed="${on}" aria-label="${on ? "Turn off" : "Turn on"} ${esc(this._name(id))}" ${unavailable ? "disabled" : ""}><span></span></button>
-        </div>
-        ${on && dim ? `<input type="range" min="1" max="100" value="${this._pct(st)}" data-act="bri" data-id="${esc(id)}" aria-label="${esc(this._name(id))} brightness">` : ""}
+      <div class="lightrow ${on ? "on" : ""}">
+        <button class="lr-hit" data-act="toggle" data-id="${esc(id)}" aria-pressed="${on}" aria-label="${name}, ${on ? "on" : "off"}" ${unavailable ? "disabled" : ""}>
+          <span class="stack tight"><span class="lname">${name}</span><span class="caption">${status}</span></span>
+          <span class="led ${on ? "lit" : ""}" aria-hidden="true"></span>
+        </button>
+        ${dim && !unavailable ? `<input class="${on ? "" : "off"}" type="range" min="1" max="100" value="${on ? this._pct(st) : 1}" data-act="bri" data-id="${esc(id)}" aria-label="${name} brightness">` : ""}
       </div>`;
+  }
+
+  _roomSwitch(areaId, name) {
+    const lights = this._lightsIn(areaId).filter((l) => this._st(l) && !["unavailable", "unknown"].includes(this._hass.states[l].state));
+    const on = lights.some((l) => this._hass.states[l].state === "on");
+    return `<button class="switch ${on ? "on" : ""}" data-act="room-toggle" data-id="${esc(areaId)}" aria-pressed="${on}" aria-label="${on ? "Turn off" : "Turn on"} all lights in ${esc(name)}" ${lights.length ? "" : "disabled"}><span></span></button>`;
   }
 
   /* Heating helpers */
@@ -802,7 +820,7 @@ class RamsHomePanel extends HTMLElement {
       const ids = this._lightsIn(r.id);
       ids.forEach((i) => assigned.add(i));
       if (!ids.length) return "";
-      return `<section class="card list"><div class="cardtop"><span class="eyebrow">${esc(r.name)}</span><button class="link" data-act="room-off" data-id="${esc(r.id)}">All off</button></div>${ids.map((i) => this._lightRow(i)).join("")}</section>`;
+      return `<section class="card list"><div class="cardtop"><span class="eyebrow">${esc(r.name)}</span>${this._roomSwitch(r.id, r.name)}</div>${ids.map((i) => this._lightRow(i)).join("")}</section>`;
     }).join("");
     const other = this._ids("light").filter((i) => !assigned.has(i) && !this._areaOf(i) && !this._isGroup(i));
     const otherCard = other.length ? `<section class="card list"><div class="cardtop"><span class="eyebrow">Not assigned to a room</span></div>${other.map((i) => this._lightRow(i)).join("")}</section>` : "";
@@ -1420,9 +1438,8 @@ class RamsHomePanel extends HTMLElement {
       const on = lights.filter((l) => this._st(l) && this._hass.states[l].state === "on").length;
       body = `
         ${cl ? this._climateBlock(cl) : ""}
-        <div class="cardtop"><span class="eyebrow">Lights</span><span class="caption">${lights.length ? (on ? `${on} of ${lights.length} on` : "All off") : "No lights in this room"}</span></div>
-        ${lights.map((l) => this._lightRow(l)).join("")}
-        ${on ? `<button class="btn solid full" data-act="room-off" data-id="${esc(id)}">Turn off all lights in ${esc(area.name)}</button>` : ""}`;
+        <div class="cardtop"><div class="stack tight"><span class="eyebrow">Lights</span><span class="caption">${lights.length ? (on ? `${on} of ${lights.length} on` : "All off") : "No lights in this room"}</span></div>${lights.length ? this._roomSwitch(id, area.name) : ""}</div>
+        ${lights.map((l) => this._lightRow(l)).join("")}`;
     }
     return `
       <button class="scrim" data-act="close" aria-label="Close"></button>
@@ -1558,7 +1575,12 @@ h1{font-size:32px;letter-spacing:-.01em}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:24px;align-items:start}
 .viewtitle{font-size:24px;margin:0 0 20px}
 .list{gap:12px}
-.lightrow{background:var(--raised);border-radius:20px;padding:16px 18px;display:flex;flex-direction:column;gap:12px;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06)}
+.lightrow{background:var(--raised);border-radius:20px;display:flex;flex-direction:column;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06);transition:box-shadow .2s}
+.lr-hit{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;min-height:64px;padding:14px 18px;text-align:left;border-radius:20px}
+.lr-hit:active{box-shadow:var(--press)}
+.lr-hit:focus-visible{outline-offset:-2px}
+.lightrow input[type=range]{margin:-4px 0 0;padding:0 18px 14px;box-sizing:content-box;width:calc(100% - 36px)}
+.lightrow input[type=range].off{opacity:.45}
 .lr-top{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .lr-top.line{padding:10px 0;border-bottom:1px solid var(--line2)}
 .lname{font-size:16px;font-weight:500}
