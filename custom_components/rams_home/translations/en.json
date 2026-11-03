@@ -48,7 +48,7 @@
   "services": {
     "all_off": {
       "name": "Everything off",
-      "description": "Turns off all lights and pauses every playing media player. Heating and security stay as they are."
+      "description": "Turns off all lights and all heating, and pauses every playing media player. Security stays as it is."
     }
   }
 }

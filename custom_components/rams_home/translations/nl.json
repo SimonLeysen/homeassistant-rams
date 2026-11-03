@@ -48,7 +48,7 @@
   "services": {
     "all_off": {
       "name": "Alles uit",
-      "description": "Schakelt alle lampen uit en pauzeert alle spelende mediaspelers. Verwarming en beveiliging blijven ongewijzigd."
+      "description": "Schakelt alle lampen en alle verwarming uit en pauzeert alle spelende mediaspelers. Beveiliging blijft ongewijzigd."
     }
   }
 }

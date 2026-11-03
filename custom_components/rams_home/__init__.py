@@ -7,7 +7,8 @@ from pathlib import Path
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_PLAYING, Platform
+from homeassistant.components.climate import HVACMode
+from homeassistant.const import STATE_PLAYING, STATE_UNAVAILABLE, STATE_UNKNOWN, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
@@ -34,7 +35,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register services that do not depend on a config entry."""
 
     async def handle_all_off(call: ServiceCall) -> None:
-        """Turn off every light and pause every playing media player."""
+        """Turn off every light and all heating, and pause every playing media player."""
         await hass.services.async_call(
             "light", "turn_off", {"entity_id": "all"}, blocking=False
         )
@@ -46,6 +47,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if playing:
             await hass.services.async_call(
                 "media_player", "media_pause", {"entity_id": playing}, blocking=False
+            )
+        heating = [
+            state.entity_id
+            for state in hass.states.async_all("climate")
+            if state.state not in (HVACMode.OFF, STATE_UNAVAILABLE, STATE_UNKNOWN)
+        ]
+        if heating:
+            await hass.services.async_call(
+                "climate", "set_hvac_mode", {"entity_id": heating, "hvac_mode": HVACMode.OFF}, blocking=False
             )
 
     hass.services.async_register(DOMAIN, "all_off", handle_all_off)

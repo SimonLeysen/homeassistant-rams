@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.4.2";
+const RAMS_VERSION = "0.4.3";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -634,7 +634,7 @@ class RamsHomePanel extends HTMLElement {
     let body;
     if (this._ui.confirm) {
       body = `
-        <div class="offtext"><strong>Turn off all lights and media?</strong><span class="caption">Heating and security stay as they are.</span></div>
+        <div class="offtext"><strong>Turn off all lights, heating and media?</strong><span class="caption">Security stays as it is.</span></div>
         <div class="row">
           <button class="btn solid" data-act="all-off">Turn off</button>
           <button class="btn" data-act="cancel-off">Cancel</button>
