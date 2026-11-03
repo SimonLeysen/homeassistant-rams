@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.3.2";
+const RAMS_VERSION = "0.4.0";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -126,6 +126,7 @@ class RamsHomePanel extends HTMLElement {
     this._hass = hass;
     if (first) {
       this._subscribe();
+      this._loadTablet();
       this._schedule();
       return;
     }
@@ -359,6 +360,8 @@ class RamsHomePanel extends HTMLElement {
         break;
       }
       case "alarm": this._call("alarm_control_panel", val, { entity_id: id }); return;
+      case "tablet-on": this._setTablet(true); return;
+      case "tablet-off": this._setTablet(false); return;
       case "cam-play": this._camStart(id); break;
       case "cam-pause": this._camStop(id); break;
       case "cam-full": ui.camFull = id; break;
@@ -453,7 +456,7 @@ class RamsHomePanel extends HTMLElement {
     return `
       <header class="header">
         <div class="hello">
-          ${this._narrow ? `<button class="iconbtn flat menu" data-act="menu" aria-label="Open Home Assistant menu">${icon("menu", 22)}</button>` : ""}
+          ${this._narrow && !this._tablet ? `<button class="iconbtn flat menu" data-act="menu" aria-label="Open Home Assistant menu">${icon("menu", 22)}</button>` : ""}
           <div>
             <div class="caption">${esc(date)}</div>
             <h1>${greeting}</h1>
@@ -1310,6 +1313,68 @@ class RamsHomePanel extends HTMLElement {
     this._schedule();
   }
 
+  /* ---------- Wall tablet ----------
+     Uses Home Assistant's own per user settings: the default page, the hidden sidebar
+     items (both stored for the signed in account) and the sidebar state of this device. */
+
+  async _loadTablet() {
+    try {
+      const r = await this._hass.callWS({ type: "frontend/get_user_data", key: "rams_home" });
+      this._tablet = !!(r && r.value && r.value.tablet);
+    } catch (e) { this._tablet = false; }
+    this._schedule();
+  }
+
+  _tabletCard() {
+    const user = this._hass.user || {};
+    const on = !!this._tablet;
+    const busy = !!this._tabletBusy;
+    let body;
+    if (on) {
+      body = `<span class="caption">This account opens straight into Rams Home, and the Home Assistant sidebar is hidden on this device.</span>
+        <div class="row"><button class="btn" data-act="tablet-off" ${busy ? "disabled" : ""}>Leave wall tablet mode</button></div>`;
+    } else if (user.is_admin) {
+      body = `<span class="caption">You are signed in as ${esc(user.name || "an administrator")}, an administrator. Sign in on the tablet with a separate account without administrator rights, then turn this on there.</span>`;
+    } else {
+      body = `<span class="caption">Opens Rams Home on start, hides every other page from the sidebar for ${esc(user.name || "this account")}, and hides the sidebar on this device.</span>
+        <div class="row"><button class="btn solid" data-act="tablet-on" ${busy ? "disabled" : ""}>Use as wall tablet</button></div>`;
+    }
+    const err = this._tabletError ? `<span class="caption cf-err" role="alert">${esc(this._tabletError)}</span>` : "";
+    return `<section class="card"><span class="eyebrow">Wall tablet</span>${body}${err}</section>`;
+  }
+
+  async _setTablet(on) {
+    const ws = (m) => this._hass.callWS(m);
+    const get = async (key) => { const r = await ws({ type: "frontend/get_user_data", key }); return (r && r.value) || {}; };
+    const set = (key, value) => ws({ type: "frontend/set_user_data", key, value });
+    const self = (this._panel && this._panel.url_path) || "rams";
+    this._tabletBusy = true; this._tabletError = null; this._schedule();
+    try {
+      const core = await get("core");
+      const side = await get("sidebar");
+      const mine = await get("rams_home");
+      if (on) {
+        const hidden = Object.keys(this._hass.panels || {}).filter((p) => p !== self);
+        await set("rams_home", { ...mine, tablet: true, prev: { default_panel: core.default_panel ?? null, hiddenPanels: side.hiddenPanels ?? null } });
+        await set("core", { ...core, default_panel: self });
+        await set("sidebar", { ...side, hiddenPanels: hidden });
+      } else {
+        const prev = mine.prev || {};
+        const nextCore = { ...core };
+        if (prev.default_panel) nextCore.default_panel = prev.default_panel; else delete nextCore.default_panel;
+        await set("core", nextCore);
+        await set("sidebar", { ...side, hiddenPanels: prev.hiddenPanels || [] });
+        await set("rams_home", { ...mine, tablet: false, prev: null });
+      }
+      this.dispatchEvent(new CustomEvent("hass-dock-sidebar", { detail: { dock: on ? "always_hidden" : "docked" }, bubbles: true, composed: true }));
+      this._tablet = on;
+    } catch (e) {
+      this._tabletError = `Could not save: ${(e && e.message) || "unknown error"}`;
+    }
+    this._tabletBusy = false;
+    this._schedule();
+  }
+
   _settingsView() {
     const t = this._ui.theme;
     return `
@@ -1328,6 +1393,7 @@ class RamsHomePanel extends HTMLElement {
           <div class="row"><button class="btn" data-act="goto" data-val="/config/integrations/integration/rams_home">Open integration options</button></div>
           <span class="caption">Rams Home ${RAMS_VERSION}</span>
         </section>
+        ${this._tabletCard()}
       </div>`;
   }
 
