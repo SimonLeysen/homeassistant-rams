@@ -3,11 +3,12 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.3.0";
+const RAMS_VERSION = "0.3.1";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
 const TEMP_STEP = 0.5;
+const LIVE_LIMIT = 5 * 60 * 1000; // live views started here pause after five minutes to spare the batteries
 const SEND_DELAY = 1500;   // ms of quiet after the last tap before the target goes to the device
 const CONFIRM_TIMEOUT = 30000;
 
@@ -188,6 +189,7 @@ class RamsHomePanel extends HTMLElement {
     window.removeEventListener("keydown", this._key);
     this._stopSound();
     this._stopTalk();
+    this._pauseOwnStreams();
     window.removeEventListener("pointerup", this._up);
     this._unsubscribe();
   }
@@ -319,7 +321,9 @@ class RamsHomePanel extends HTMLElement {
     const { act, id, val } = el.dataset;
     const ui = this._ui;
     switch (act) {
-      case "nav": ui.view = id; ui.sheet = null; window.scrollTo(0, 0); break;
+      case "nav":
+        if (ui.view === "security" && id !== "security") this._pauseOwnStreams();
+        ui.view = id; ui.sheet = null; window.scrollTo(0, 0); break;
       case "menu": this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true })); return;
       case "theme": ui.theme = this._isDark() ? "light" : "dark"; store.set("theme", ui.theme); break;
       case "themeset": ui.theme = val; store.set("theme", val); break;
@@ -990,7 +994,7 @@ class RamsHomePanel extends HTMLElement {
           </div>
           ${err}
           <div class="cf-rows">${rows.map(([k, v, g]) => `<div class="cf-row"><span class="caption">${esc(k)}</span><span class="cf-val">${g || ""}${esc(v)}</span></div>`).join("")}</div>
-          <p class="caption">${eufy ? "Battery cameras end a live view on their own after a few minutes to save power." : ""}</p>
+          <p class="caption">${eufy ? "To spare the battery, the live view pauses after five minutes and when you leave this page." : ""}</p>
         </div>
       </div>`;
   }
@@ -1013,6 +1017,7 @@ class RamsHomePanel extends HTMLElement {
     if (!this._isEufy(id)) { c.on = true; this._schedule(); return; }
     c.pending = "start";
     c.since = Date.now();
+    c.own = true;
     clearTimeout(c.timer);
     c.timer = setTimeout(() => {
       if (this._cam[id] === c && c.pending === "start") {
@@ -1039,6 +1044,13 @@ class RamsHomePanel extends HTMLElement {
     c.timer = setTimeout(() => { if (c.pending === "stop") { c.pending = null; this._schedule(); } }, 15000);
   }
 
+  // Streams this panel started are paused when you leave the Security page or the panel.
+  _pauseOwnStreams() {
+    for (const [id, c] of Object.entries(this._cam)) {
+      if (c.own && (this._camLive(id) || c.pending === "start")) this._camStop(id);
+    }
+  }
+
   _closeCam() {
     const id = this._ui.camFull;
     this._ui.camFull = null;
@@ -1050,6 +1062,8 @@ class RamsHomePanel extends HTMLElement {
   // Runs after every render: keeps players, pending states and audio in line with the camera state.
   _syncLive() {
     let again = false;
+    // Watch cameras with a player or a pending action on every view, so they are cleaned up anywhere.
+    for (const id of [...this._live.keys(), ...Object.keys(this._cam)]) this._deps.add(id);
     for (const id of this._ids("camera")) {
       const live = this._camLive(id);
       const c = this._cam[id];
@@ -1060,6 +1074,8 @@ class RamsHomePanel extends HTMLElement {
           if (c.wantTalk) { c.wantTalk = false; this._startTalk(id); }
         }
         if (!live && c.pending === "stop") { c.pending = null; clearTimeout(c.timer); again = true; }
+        if (live && c.own && !c.limit) c.limit = setTimeout(() => { c.limit = null; if (this._camLive(id)) this._camStop(id); }, LIVE_LIMIT);
+        if (!live && c.limit) { clearTimeout(c.limit); c.limit = null; c.own = false; }
       }
       if (!live) {
         if (this._sound && this._sound.id === id) this._stopSound();
