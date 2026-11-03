@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.3.1";
+const RAMS_VERSION = "0.3.2";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -828,7 +828,14 @@ class RamsHomePanel extends HTMLElement {
         </div>
       </section>` : "";
     const cams = this._ids("camera").map((id) => this._camCard(id)).join("");
-    const contacts = this._ids("binary_sensor").filter((id) => ["door", "window", "opening", "garage_door"].includes(this._hass.states[id].attributes.device_class));
+    // Real contact sensors only. Tado reports a window as open when a radiator sees the
+    // temperature drop; that is a guess, so it stays out of this list.
+    const guessed = new Set(["tado"]);
+    const contacts = this._ids("binary_sensor").filter((id) => {
+      const ent = this._hass.entities && this._hass.entities[id];
+      if (ent && guessed.has(ent.platform)) return false;
+      return ["door", "window", "opening", "garage_door"].includes(this._hass.states[id].attributes.device_class);
+    });
     const contactCard = contacts.length ? `<section class="card list"><div class="cardtop"><span class="eyebrow">Doors and windows</span></div>${contacts.map((id) => {
       const st = this._st(id);
       return `<div class="lr-top line"><span class="lname">${esc(this._name(id))}</span><span class="caption">${st.state === "on" ? "Open" : "Closed"}</span></div>`;
