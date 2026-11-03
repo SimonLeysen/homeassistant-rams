@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.4.3";
+const RAMS_VERSION = "0.4.4";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -345,6 +345,13 @@ class RamsHomePanel extends HTMLElement {
       case "light-open": ui.sheetBack = ui.sheet && !String(ui.sheet).startsWith("light:") ? ui.sheet : null; ui.sheet = "light:" + id; break;
       case "sheet-back": ui.sheet = ui.sheetBack; ui.sheetBack = null; break;
       case "toggle": this._call("light", "toggle", { entity_id: id }); return;
+      case "all-lights": {
+        const ids = this._roomLights().filter((l) => this._hass.states[l] && !["unavailable", "unknown"].includes(this._hass.states[l].state));
+        if (!ids.length) return;
+        const anyOn = ids.some((l) => this._hass.states[l].state === "on");
+        this._call("light", anyOn ? "turn_off" : "turn_on", { entity_id: ids });
+        return;
+      }
       case "room-toggle": {
         const ids = this._lightsIn(id).filter((l) => this._hass.states[l] && this._hass.states[l].state !== "unavailable");
         if (!ids.length) return;
@@ -842,18 +849,21 @@ class RamsHomePanel extends HTMLElement {
 
   /* Other views */
 
+  // Lights shown on the Lights page: those in the rooms, without lights outside any room.
+  _roomLights() {
+    return this._rooms().flatMap((r) => this._lightsIn(r.id));
+  }
+
   _lightsView() {
-    const rooms = this._rooms();
-    const assigned = new Set();
-    const cards = rooms.map((r) => {
+    const cards = this._rooms().map((r) => {
       const ids = this._lightsIn(r.id);
-      ids.forEach((i) => assigned.add(i));
       if (!ids.length) return "";
       return `<section class="card list"><div class="cardtop"><span class="eyebrow">${esc(r.name)}</span>${this._roomSwitch(r.id, r.name)}</div>${ids.map((i) => this._lightRow(i)).join("")}</section>`;
     }).join("");
-    const other = this._ids("light").filter((i) => !assigned.has(i) && !this._areaOf(i) && !this._isGroup(i));
-    const otherCard = other.length ? `<section class="card list"><div class="cardtop"><span class="eyebrow">Not assigned to a room</span></div>${other.map((i) => this._lightRow(i)).join("")}</section>` : "";
-    return `<h2 class="viewtitle">Lights</h2><div class="grid">${cards}${otherCard}</div>`;
+    const usable = this._roomLights().filter((l) => this._st(l) && !["unavailable", "unknown"].includes(this._hass.states[l].state));
+    const anyOn = usable.some((l) => this._hass.states[l].state === "on");
+    const master = `<button class="switch ${anyOn ? "on" : ""}" data-act="all-lights" aria-pressed="${anyOn}" aria-label="${anyOn ? "Turn off" : "Turn on"} all lights" ${usable.length ? "" : "disabled"}><span></span></button>`;
+    return `<div class="viewhead"><h2 class="viewtitle">Lights</h2>${master}</div><div class="grid">${cards}</div>`;
   }
 
   _heatingView() {
@@ -1612,6 +1622,8 @@ h1{font-size:32px;letter-spacing:-.01em}
 /* Lists and controls */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:24px;align-items:start}
 .viewtitle{font-size:24px;margin:0 0 20px}
+.viewhead{display:flex;align-items:center;gap:20px;margin:0 0 20px}
+.viewhead .viewtitle{margin:0}
 .list{gap:12px}
 .lightrow{background:var(--raised);border-radius:20px;display:flex;flex-direction:column;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06);transition:box-shadow .2s}
 .lightrow.row{flex-direction:row;align-items:center;padding-right:18px}
