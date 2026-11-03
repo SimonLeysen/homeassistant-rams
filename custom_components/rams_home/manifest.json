@@ -1,14 +1,25 @@
 {
   "domain": "rams_home",
   "name": "Rams Home",
-  "codeowners": ["@SimonLeysen"],
+  "after_dependencies": [
+    "eufy_security",
+    "ffmpeg"
+  ],
+  "codeowners": [
+    "@SimonLeysen"
+  ],
   "config_flow": true,
-  "dependencies": ["frontend", "http", "panel_custom"],
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
   "documentation": "https://github.com/SimonLeysen/homeassistant-rams",
   "integration_type": "service",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/SimonLeysen/homeassistant-rams/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.2.1"
+  "version": "0.3.0"
 }

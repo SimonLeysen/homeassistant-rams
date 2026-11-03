@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.2.1";
+const RAMS_VERSION = "0.3.0";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -32,7 +32,28 @@ const ICONS = {
   m_sleep: '<path d="M20 14.2A8 8 0 1 1 9.8 4a6.5 6.5 0 0 0 10.2 10.2z"/><path d="M17 3.5v3M15.5 5h3"/>',
   m_holiday: '<path d="M3.5 11a8.5 8.5 0 0 1 17 0c-1.4-1-2.85-1-4.25 0-1.4-1-2.85-1-4.25 0-1.4-1-2.85-1-4.25 0-1.4-1-2.85-1-4.25 0z"/><path d="M12 11v9"/><path d="M7.5 20h9"/>',
   camera: '<rect x="3.5" y="7" width="12.5" height="10" rx="2"/><path d="M16 11l4.5-2.5v7L16 13"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/>',
+  pause: '<path d="M8.5 5.5v13M15.5 5.5v13" stroke-width="3"/>',
+  expand: '<path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/>',
+  sound: '<path d="M4.5 9.5h3l4.5-4v13l-4.5-4h-3z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
+  mute: '<path d="M4.5 9.5h3l4.5-4v13l-4.5-4h-3z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>',
+  mic: '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/>',
+  micoff: '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5M4 4l16 16"/>',
+  bolt: '<path d="M13 3 6 13.5h5L10 21l7-10.5h-5z" fill="currentColor" stroke="none"/>',
 };
+
+// Battery outline with four segments; stage is 0 to 4.
+const battIcon = (stage, charging) => `<svg class="glyph" width="26" height="13" viewBox="0 0 26 13" aria-hidden="true">
+  <rect x="0.75" y="0.75" width="21.5" height="11.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <rect x="23.25" y="4" width="2" height="5" rx="1" fill="currentColor"/>
+  ${[0, 1, 2, 3].map((i) => `<rect x="${2.75 + i * 4.75}" y="2.75" width="3.75" height="7.5" rx="1" fill="currentColor" opacity="${i < stage ? 1 : 0.2}"/>`).join("")}
+  ${charging ? '<path d="M12.6 1.5 8.8 7h2.9l-1 4.5 3.9-5.6h-2.9z" fill="currentColor" stroke="var(--boltgap,#000)" stroke-width="1"/>' : ""}
+</svg>`;
+
+// Four rising bars; level is 0 to 4.
+const signalIcon = (level) => `<svg class="glyph" width="17" height="13" viewBox="0 0 17 13" aria-hidden="true">
+  ${[0, 1, 2, 3].map((i) => `<rect x="${i * 4.5}" y="${10 - i * 3}" width="3" height="${3 + i * 3}" rx="1" fill="currentColor" opacity="${i < level ? 1 : 0.25}"/>`).join("")}
+</svg>`;
 
 const MODES = [
   { id: "home", label: "Home", icon: "m_home" },
@@ -91,6 +112,10 @@ class RamsHomePanel extends HTMLElement {
     this._notifications = {};
     this._dragging = false;
     this._pend = {};   // climate entity -> { on, temp, timer, sent, guard }
+    this._cam = {};    // camera entity -> { pending: "start"|"stop", since, error, wantSound, wantTalk }
+    this._live = new Map(); // camera entity -> persistent ha-camera-stream element
+    this._sound = null;     // { id, unsub, gain, next }
+    this._talk = null;      // { id, unsub, stream, node, proc, pos, buf }
   }
 
   /* ---------- Home Assistant hooks ---------- */
@@ -152,11 +177,17 @@ class RamsHomePanel extends HTMLElement {
     }
     window.addEventListener("pointerup", (this._up = () => { if (this._dragging) { this._dragging = false; this._schedule(); } }));
     this._clock = setInterval(() => this._tick(), 1000);
+    window.addEventListener("keydown", (this._key = (e) => {
+      if (e.key === "Escape" && this._ui.camFull) { this._closeCam(); this._schedule(); }
+    }));
     if (this._hass) { this._subscribe(); this._schedule(); }
   }
 
   disconnectedCallback() {
     clearInterval(this._clock);
+    window.removeEventListener("keydown", this._key);
+    this._stopSound();
+    this._stopTalk();
     window.removeEventListener("pointerup", this._up);
     this._unsubscribe();
   }
@@ -324,6 +355,12 @@ class RamsHomePanel extends HTMLElement {
         break;
       }
       case "alarm": this._call("alarm_control_panel", val, { entity_id: id }); return;
+      case "cam-play": this._camStart(id); break;
+      case "cam-pause": this._camStop(id); break;
+      case "cam-full": ui.camFull = id; break;
+      case "cam-close": this._closeCam(); break;
+      case "cam-sound": this._toggleSound(id); break;
+      case "cam-talk": this._toggleTalk(id); break;
       case "more": this._moreInfo(id); return;
       case "dismiss": this._call("persistent_notification", "dismiss", { notification_id: id }); return;
       case "goto": this._navigate(val); return;
@@ -364,7 +401,16 @@ class RamsHomePanel extends HTMLElement {
     else if (view === "security") main = this._securityView();
     else main = this._settingsView();
 
-    this.shadowRoot.innerHTML = `
+    if (!this._root) {
+      // Live players sit in their own layer and are laid over their slot after each
+      // render. Moving them in the DOM would make Home Assistant restart the stream.
+      this.shadowRoot.innerHTML = `<div class="root"></div><div class="layer"></div>`;
+      this._root = this.shadowRoot.querySelector(".root");
+      this._layer = this.shadowRoot.querySelector(".layer");
+      window.addEventListener("scroll", () => this._placeLive(), { capture: true, passive: true });
+      if (window.ResizeObserver) new ResizeObserver(() => this._placeLive()).observe(this);
+    }
+    this._root.innerHTML = `
       <style>${STYLES}</style>
       <div class="wrap ${dark ? "dark" : ""}" style="--accent:${esc(this._ui.accent)}">
         <div class="shell">
@@ -374,7 +420,9 @@ class RamsHomePanel extends HTMLElement {
           <main class="main" aria-live="polite">${main}</main>
         </div>
         ${this._sheet()}
+        ${this._camModal()}
       </div>`;
+    this._syncLive();
 
     const newSheet = this.shadowRoot.querySelector(".sheet-body");
     if (newSheet) newSheet.scrollTop = sheetScroll;
@@ -775,19 +823,468 @@ class RamsHomePanel extends HTMLElement {
             `<button class="chip ${ast.state === s ? "pressed" : ""}" data-act="alarm" data-id="${esc(alarm)}" data-val="${svc}" aria-pressed="${ast.state === s}">${l}</button>`).join("")}
         </div>
       </section>` : "";
-    const cams = this._ids("camera").map((id) => {
-      const st = this._st(id);
-      return `<button class="cam" data-act="more" data-id="${esc(id)}" aria-label="Open ${esc(this._name(id))}">
-        ${st.attributes.entity_picture ? `<img src="${esc(st.attributes.entity_picture)}" alt="">` : `<span class="camph">${icon("camera", 32)}</span>`}
-        <span class="camlabel">${esc(this._name(id))}<span class="caption">${esc(st.state)}</span></span>
-      </button>`;
-    }).join("");
+    const cams = this._ids("camera").map((id) => this._camCard(id)).join("");
     const contacts = this._ids("binary_sensor").filter((id) => ["door", "window", "opening", "garage_door"].includes(this._hass.states[id].attributes.device_class));
     const contactCard = contacts.length ? `<section class="card list"><div class="cardtop"><span class="eyebrow">Doors and windows</span></div>${contacts.map((id) => {
       const st = this._st(id);
       return `<div class="lr-top line"><span class="lname">${esc(this._name(id))}</span><span class="caption">${st.state === "on" ? "Open" : "Closed"}</span></div>`;
     }).join("")}</section>` : "";
     return `<h2 class="viewtitle">Security</h2><div class="grid">${alarmCard}${contactCard}</div>${cams ? `<div class="cams">${cams}</div>` : ""}`;
+  }
+
+  /* ---------- Cameras ---------- */
+
+  _camName(id) {
+    const area = this._areaOf(id);
+    const areas = this._hass.areas || {};
+    return (area && areas[area] && areas[area].name) || this._name(id);
+  }
+
+  _isEufy(id) {
+    const ent = this._hass.entities && this._hass.entities[id];
+    return !!ent && ent.platform === "eufy_security";
+  }
+
+  // Battery, signal and motion entities that belong to the same device as the camera.
+  _camParts(id) {
+    const ents = this._hass.entities || {};
+    const dev = ents[id] && ents[id].device_id;
+    const parts = {};
+    if (!dev) return parts;
+    for (const e of Object.values(ents)) {
+      if (e.device_id !== dev) continue;
+      const eid = e.entity_id;
+      if (eid.startsWith("sensor.") && eid.endsWith("_battery_percentage")) parts.battery = eid;
+      else if (eid.startsWith("sensor.") && eid.endsWith("_wifi_rssi")) parts.rssi = eid;
+      else if (eid.startsWith("sensor.") && eid.endsWith("_wifi_signal_level")) parts.level = eid;
+      else if (eid.startsWith("sensor.") && eid.endsWith("_charging_status")) parts.charging = eid;
+      else if (eid.startsWith("binary_sensor.") && eid.endsWith("_motion_detected")) parts.motion = eid;
+      else if (eid.startsWith("binary_sensor.") && eid.endsWith("_person_detected")) parts.person = eid;
+    }
+    if (!parts.battery) {
+      const b = Object.values(ents).find((e) => e.device_id === dev && e.entity_id.startsWith("sensor.") && this._hass.states[e.entity_id] && this._hass.states[e.entity_id].attributes.device_class === "battery");
+      if (b) parts.battery = b.entity_id;
+    }
+    return parts;
+  }
+
+  _camInfo(id) {
+    const p = this._camParts(id);
+    const num = (eid) => { const st = eid && this._st(eid); const v = st ? Number(st.state) : NaN; return isNaN(v) ? null : v; };
+    const txt = (eid) => { const st = eid && this._st(eid); return st && !["unknown", "unavailable"].includes(st.state) ? st.state : null; };
+    const battery = num(p.battery);
+    const rssi = num(p.rssi);
+    const chargeTxt = txt(p.charging);
+    return {
+      battery,
+      battStage: battery === null ? null : battery > 75 ? 4 : battery > 50 ? 3 : battery > 25 ? 2 : battery > 10 ? 1 : 0,
+      charging: !!chargeTxt && /charg/i.test(chargeTxt) && !/not/i.test(chargeTxt),
+      chargeTxt,
+      rssi,
+      sigStage: rssi === null ? null : rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : rssi >= -85 ? 1 : 0,
+      levelTxt: txt(p.level),
+      motion: p.motion && this._st(p.motion),
+      person: p.person && this._st(p.person),
+    };
+  }
+
+  _camLive(id) {
+    const st = this._hass.states[id];
+    if (!st) return false;
+    return this._isEufy(id) ? st.state === "streaming" : !!(this._cam[id] && this._cam[id].on);
+  }
+
+  _camStatus(id) {
+    const c = this._cam[id] || {};
+    if (c.error) return c.error;
+    if (c.pending === "start") return "Connecting";
+    if (c.pending === "stop") return "Stopping";
+    return this._camLive(id) ? "Live" : "Paused";
+  }
+
+  _statPill(info) {
+    const parts = [];
+    if (info.battStage !== null) {
+      parts.push(`<span class="pillpart ${info.battery <= 15 && !info.charging ? "low" : ""}">${battIcon(info.battStage, info.charging)}<span>${Math.round(info.battery)}%</span></span>`);
+    }
+    if (info.sigStage !== null) parts.push(`<span class="pillpart">${signalIcon(info.sigStage)}</span>`);
+    if (!parts.length) return "";
+    const label = [
+      info.battery !== null ? `Battery ${Math.round(info.battery)} percent${info.charging ? ", charging" : ""}` : "",
+      info.levelTxt || info.rssi !== null ? `Wi-Fi ${info.levelTxt ? info.levelTxt.toLowerCase() : ""}${info.rssi !== null ? ` ${String(info.rssi).replace("-", "\u2212")} dBm` : ""}` : "",
+    ].filter(Boolean).join(", ");
+    return `<span class="statpill" role="img" aria-label="${esc(label)}">${parts.join("")}</span>`;
+  }
+
+  _still(st, cls = "") {
+    const pic = st.attributes.entity_picture;
+    return pic ? `<img class="still ${cls}" src="${esc(pic)}" alt="">` : `<span class="still camph">${icon("camera", 32)}</span>`;
+  }
+
+  _camCard(id) {
+    const st = this._st(id);
+    const name = this._camName(id);
+    const live = this._camLive(id);
+    const c = this._cam[id] || {};
+    const busy = !!c.pending;
+    const inModal = this._ui.camFull === id;
+    const info = this._camInfo(id);
+    const playAct = live || c.pending === "start" ? "cam-pause" : "cam-play";
+    return `
+      <section class="camcard">
+        <div class="camview ${live ? "is-live" : ""}">
+          ${this._still(st)}
+          ${live && !inModal ? `<div class="camslot" data-camslot="${esc(id)}"></div>` : ""}
+          ${live ? `<span class="livebadge"><span class="livedot"></span>Live</span>` : ""}
+          ${this._statPill(info)}
+          ${busy && c.pending === "start" ? `<span class="spin" aria-hidden="true"></span>` : ""}
+          <button class="cambtn play" data-act="${playAct}" data-id="${esc(id)}" aria-label="${playAct === "cam-play" ? "Play" : "Pause"} ${esc(name)}" ${c.pending === "stop" ? "disabled" : ""}>${icon(playAct === "cam-play" ? "play" : "pause", 22)}</button>
+          <button class="cambtn full" data-act="cam-full" data-id="${esc(id)}" aria-label="Open ${esc(name)} full screen">${icon("expand", 20)}</button>
+        </div>
+        <div class="camlabel"><span>${esc(name)}</span><span class="caption">${esc(this._camStatus(id))}</span></div>
+      </section>`;
+  }
+
+  _camModal() {
+    const id = this._ui.camFull;
+    const st = id && this._st(id);
+    if (!st) return "";
+    const name = this._camName(id);
+    const live = this._camLive(id);
+    const c = this._cam[id] || {};
+    const info = this._camInfo(id);
+    const soundOn = !!(this._sound && this._sound.id === id) || (!!c.wantSound && c.pending === "start");
+    const talkOn = !!(this._talk && this._talk.id === id) || (!!c.wantTalk && c.pending === "start");
+    const playAct = live || c.pending === "start" ? "cam-pause" : "cam-play";
+    const eufy = this._isEufy(id);
+    const station = eufy && Object.keys(this._hass.states).find((e) => e.startsWith("binary_sensor.") && e.endsWith("_connected") && this._hass.entities && this._hass.entities[e] && this._hass.entities[e].platform === "eufy_security");
+    const stationSt = station && this._st(station);
+    const rows = [
+      ["Status", this._camStatus(id)],
+      info.battery !== null ? ["Battery", `${Math.round(info.battery)}%${info.chargeTxt ? `, ${info.chargeTxt.toLowerCase()}` : ""}`, battIcon(info.battStage, info.charging)] : null,
+      info.rssi !== null || info.levelTxt ? ["Wi-Fi", [info.levelTxt, info.rssi !== null ? `${String(info.rssi).replace("-", "\u2212")} dBm` : ""].filter(Boolean).join(", "), info.sigStage !== null ? signalIcon(info.sigStage) : ""] : null,
+      stationSt ? ["HomeBase", stationSt.state === "on" ? "Connected" : "Not connected"] : null,
+      info.motion ? ["Last motion", this._ago(info.motion)] : null,
+      info.person ? ["Last person", this._ago(info.person)] : null,
+    ].filter(Boolean);
+    const err = c.error ? `<p class="caption cf-err" role="alert">${esc(c.error)}</p>` : "";
+    return `
+      <div class="camfull" role="dialog" aria-modal="true" aria-label="${esc(name)} camera">
+        <div class="cf-stage ${live ? "is-live" : ""}">
+          ${this._still(st, "contain")}
+          ${live ? `<div class="camslot" data-camslot="${esc(id)}"></div>` : ""}
+          ${c.pending === "start" ? `<span class="spin" aria-hidden="true"></span>` : ""}
+        </div>
+        <div class="cf-panel">
+          <div class="cf-head">
+            <div class="stack tight"><span class="eyebrow">Camera</span><h2>${esc(name)}</h2></div>
+            <button class="iconbtn" data-act="cam-close" aria-label="Close">${icon("close", 20)}</button>
+          </div>
+          <div class="cf-controls">
+            <button class="cfbtn ${live ? "on" : ""}" data-act="${playAct}" data-id="${esc(id)}" aria-pressed="${live}" ${c.pending === "stop" ? "disabled" : ""}>
+              <span class="cfface">${icon(playAct === "cam-play" ? "play" : "pause", 24)}</span><span>${playAct === "cam-play" ? "Play" : "Pause"}</span></button>
+            <button class="cfbtn ${soundOn ? "on" : ""}" data-act="cam-sound" data-id="${esc(id)}" aria-pressed="${soundOn}" ${eufy ? "" : "disabled"}>
+              <span class="cfface">${icon(soundOn ? "sound" : "mute", 24)}</span><span>${soundOn ? "Sound on" : "Sound off"}</span></button>
+            <button class="cfbtn ${talkOn ? "on talk" : ""}" data-act="cam-talk" data-id="${esc(id)}" aria-pressed="${talkOn}" ${eufy ? "" : "disabled"}>
+              <span class="cfface">${icon(talkOn ? "mic" : "micoff", 24)}</span><span>${talkOn ? "Talking" : "Talk"}</span></button>
+          </div>
+          ${err}
+          <div class="cf-rows">${rows.map(([k, v, g]) => `<div class="cf-row"><span class="caption">${esc(k)}</span><span class="cf-val">${g || ""}${esc(v)}</span></div>`).join("")}</div>
+          <p class="caption">${eufy ? "Battery cameras end a live view on their own after a few minutes to save power." : ""}</p>
+        </div>
+      </div>`;
+  }
+
+  _ago(st) {
+    const t = Date.parse(st.last_changed);
+    if (isNaN(t)) return "Unknown";
+    const min = Math.round((Date.now() - t) / 60000);
+    if (min < 1) return "Just now";
+    if (min < 60) return `${min} min ago`;
+    const h = Math.round(min / 60);
+    if (h < 24) return `${h} ${h === 1 ? "hour" : "hours"} ago`;
+    const d = Math.round(h / 24);
+    return `${d} ${d === 1 ? "day" : "days"} ago`;
+  }
+
+  async _camStart(id) {
+    const c = this._cam[id] = { ...(this._cam[id] || {}), error: null };
+    if (this._camLive(id)) return;
+    if (!this._isEufy(id)) { c.on = true; this._schedule(); return; }
+    c.pending = "start";
+    c.since = Date.now();
+    clearTimeout(c.timer);
+    c.timer = setTimeout(() => {
+      if (this._cam[id] === c && c.pending === "start") {
+        c.pending = null; c.error = "The camera did not respond"; c.wantSound = c.wantTalk = false; this._schedule();
+      }
+    }, 30000);
+    this._schedule();
+    try {
+      await this._call("eufy_security", "start_p2p_livestream", { entity_id: id });
+    } catch (e) {
+      // "Already running" is fine; anything else shows once the timeout passes.
+    }
+  }
+
+  async _camStop(id) {
+    if (this._sound && this._sound.id === id) this._stopSound();
+    if (this._talk && this._talk.id === id) this._stopTalk();
+    const c = this._cam[id] = { ...(this._cam[id] || {}), error: null, wantSound: false, wantTalk: false };
+    clearTimeout(c.timer);
+    if (!this._isEufy(id)) { c.on = false; c.pending = null; this._schedule(); return; }
+    c.pending = this._camLive(id) ? "stop" : null;
+    this._schedule();
+    try { await this._call("eufy_security", "stop_p2p_livestream", { entity_id: id }); } catch (e) { /* state decides */ }
+    c.timer = setTimeout(() => { if (c.pending === "stop") { c.pending = null; this._schedule(); } }, 15000);
+  }
+
+  _closeCam() {
+    const id = this._ui.camFull;
+    this._ui.camFull = null;
+    if (this._sound && this._sound.id === id) this._stopSound();
+    if (this._talk && this._talk.id === id) this._stopTalk();
+    if (id && this._cam[id]) { this._cam[id].wantSound = false; this._cam[id].wantTalk = false; }
+  }
+
+  // Runs after every render: keeps players, pending states and audio in line with the camera state.
+  _syncLive() {
+    let again = false;
+    for (const id of this._ids("camera")) {
+      const live = this._camLive(id);
+      const c = this._cam[id];
+      if (c) {
+        if (live && c.pending === "start") {
+          c.pending = null; clearTimeout(c.timer); again = true;
+          if (c.wantSound) { c.wantSound = false; this._startSound(id); }
+          if (c.wantTalk) { c.wantTalk = false; this._startTalk(id); }
+        }
+        if (!live && c.pending === "stop") { c.pending = null; clearTimeout(c.timer); again = true; }
+      }
+      if (!live) {
+        if (this._sound && this._sound.id === id) this._stopSound();
+        if (this._talk && this._talk.id === id) this._stopTalk();
+        const rec = this._live.get(id);
+        if (rec) { rec.frame.remove(); this._live.delete(id); }
+        continue;
+      }
+      let rec = this._live.get(id);
+      if (!rec) {
+        if (!customElements.get("ha-camera-stream")) { this._loadStreamEl(id); continue; }
+        const frame = document.createElement("div");
+        frame.className = "liveframe";
+        const el = document.createElement("ha-camera-stream");
+        el.muted = true;
+        el.controls = false;
+        frame.appendChild(el);
+        this._layer.appendChild(frame);
+        rec = { frame, el };
+        this._live.set(id, rec);
+      }
+      rec.el.hass = this._hass;
+      if (rec.el.stateObj !== this._hass.states[id]) rec.el.stateObj = this._hass.states[id];
+      const fit = this._ui.camFull === id ? "contain" : "cover";
+      if (rec.el.fitMode !== fit) rec.el.fitMode = fit;
+    }
+    this._placeLive();
+    if (again) this._schedule();
+  }
+
+  _placeLive() {
+    if (!this._root || !this._live.size) return;
+    const host = this.getBoundingClientRect();
+    this._live.forEach((rec, id) => {
+      const slot = this._root.querySelector(`[data-camslot="${CSS.escape(id)}"]`);
+      const f = rec.frame.style;
+      if (!slot) { f.visibility = "hidden"; return; }
+      const r = slot.getBoundingClientRect();
+      const full = this._ui.camFull === id;
+      f.visibility = "visible";
+      f.top = `${r.top - host.top}px`;
+      f.left = `${r.left - host.left}px`;
+      f.width = `${r.width}px`;
+      f.height = `${r.height}px`;
+      f.zIndex = full ? "21" : "1";
+      f.borderRadius = full ? "0" : "28px 28px 0 0";
+      f.setProperty("--video-max-height", `${r.height}px`);
+    });
+  }
+
+  // Home Assistant loads its camera player on demand; a picture card pulls it in.
+  _loadStreamEl(id) {
+    if (this._streamLoading) return;
+    this._streamLoading = (async () => {
+      try {
+        const helpers = window.loadCardHelpers && (await window.loadCardHelpers());
+        if (helpers) {
+          const card = await helpers.createCardElement({ type: "picture-entity", entity: id, camera_view: "live", show_name: false, show_state: false });
+          card.hass = this._hass;
+        }
+      } catch (e) { /* fall through to the wait */ }
+      await Promise.race([customElements.whenDefined("ha-camera-stream"), new Promise((r) => setTimeout(r, 10000))]);
+      if (!customElements.get("ha-camera-stream")) {
+        for (const cid of Object.keys(this._cam)) this._cam[cid].error = "The video player could not be loaded";
+        this._streamLoading = null;
+      }
+      this._schedule();
+    })();
+  }
+
+  /* Camera sound: the integration relays the camera audio as 16 kHz PCM. */
+
+  _ctx() {
+    if (!this._audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this._audioCtx = new AC();
+    }
+    if (this._audioCtx.state === "suspended") this._audioCtx.resume();
+    return this._audioCtx;
+  }
+
+  _toggleSound(id) {
+    if (this._sound && this._sound.id === id) { this._stopSound(); return; }
+    const c = this._cam[id] = { ...(this._cam[id] || {}), error: null };
+    this._ctx(); // unlock audio inside the tap
+    if (!this._camLive(id)) {
+      // Not live yet: remember the wish and start the live view; it applies once live.
+      if (c.pending === "start") { c.wantSound = !c.wantSound; this._schedule(); } else { c.wantSound = true; this._camStart(id); }
+      return;
+    }
+    this._startSound(id);
+  }
+
+  async _startSound(id) {
+    this._stopSound();
+    const ctx = this._ctx();
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    const s = { id, gain, next: 0, unsub: null, dead: false };
+    this._sound = s;
+    this._schedule();
+    try {
+      const unsub = await this._hass.connection.subscribeMessage((m) => this._playPcm(s, m), { type: "rams_home/camera/listen", entity_id: id });
+      if (s.dead) unsub(); else s.unsub = unsub;
+    } catch (e) {
+      if (this._sound === s) this._sound = null;
+      this._camError(id, `Sound could not start: ${(e && e.message) || "unknown error"}`);
+    }
+  }
+
+  _playPcm(s, m) {
+    if (s.dead || !m || !m.pcm) return;
+    const ctx = this._audioCtx;
+    const bin = atob(m.pcm);
+    const n = bin.length >> 1;
+    if (!n) return;
+    const buf = ctx.createBuffer(1, n, m.rate || 16000);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+      if (v >= 32768) v -= 65536;
+      ch[i] = v / 32768;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(s.gain);
+    const now = ctx.currentTime;
+    // A small buffer absorbs network jitter; restart it after a gap or a pile up.
+    if (s.next < now + 0.04 || s.next > now + 1.2) s.next = now + 0.25;
+    src.start(s.next);
+    s.next += buf.duration;
+  }
+
+  _stopSound() {
+    const s = this._sound;
+    if (!s) return;
+    s.dead = true;
+    this._sound = null;
+    try { if (s.unsub) s.unsub(); } catch (e) { /* ignore */ }
+    try { s.gain.disconnect(); } catch (e) { /* ignore */ }
+    this._schedule();
+  }
+
+  /* Talk: the microphone is resampled to 16 kHz PCM and encoded by the integration. */
+
+  _toggleTalk(id) {
+    if (this._talk && this._talk.id === id) { this._stopTalk(); return; }
+    const c = this._cam[id] = { ...(this._cam[id] || {}), error: null };
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      this._camError(id, "The microphone needs a secure connection. Open Home Assistant through its https address.");
+      return;
+    }
+    this._ctx();
+    if (!this._camLive(id)) {
+      if (c.pending === "start") { c.wantTalk = !c.wantTalk; this._schedule(); } else { c.wantTalk = true; this._camStart(id); }
+      return;
+    }
+    this._startTalk(id);
+  }
+
+  async _startTalk(id) {
+    this._stopTalk();
+    const t = { id, dead: false, pos: 0, out: [] };
+    this._talk = t;
+    this._schedule();
+    try {
+      t.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      if (t.dead) { t.stream.getTracks().forEach((k) => k.stop()); return; }
+      t.unsub = await this._hass.connection.subscribeMessage(() => {}, { type: "rams_home/camera/talk", entity_id: id });
+      if (t.dead) { t.unsub(); t.stream.getTracks().forEach((k) => k.stop()); return; }
+      const ctx = this._ctx();
+      t.node = ctx.createMediaStreamSource(t.stream);
+      t.proc = ctx.createScriptProcessor(4096, 1, 1);
+      t.silent = ctx.createGain();
+      t.silent.gain.value = 0;
+      const ratio = ctx.sampleRate / 16000;
+      t.proc.onaudioprocess = (e) => {
+        if (t.dead) return;
+        const input = e.inputBuffer.getChannelData(0);
+        let pos = t.pos;
+        while (pos < input.length) {
+          const a = Math.floor(pos);
+          const b = Math.max(a + 1, Math.min(input.length, Math.floor(pos + ratio)));
+          let sum = 0;
+          for (let k = a; k < b; k++) sum += input[k];
+          const v = Math.max(-1, Math.min(1, sum / (b - a)));
+          t.out.push(v < 0 ? v * 32768 : v * 32767);
+          pos += ratio;
+        }
+        t.pos = pos - input.length;
+        if (t.out.length >= 1600) {
+          const pcm = new Int16Array(t.out);
+          t.out = [];
+          const bytes = new Uint8Array(pcm.buffer);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          this._hass.connection.sendMessage({ type: "rams_home/camera/talk_audio", entity_id: id, pcm: btoa(bin) });
+        }
+      };
+      t.node.connect(t.proc);
+      t.proc.connect(t.silent);
+      t.silent.connect(ctx.destination);
+    } catch (e) {
+      const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+      this._stopTalk();
+      this._camError(id, denied ? "Microphone access was not allowed" : `Talk could not start: ${(e && e.message) || "unknown error"}`);
+    }
+  }
+
+  _stopTalk() {
+    const t = this._talk;
+    if (!t) return;
+    t.dead = true;
+    this._talk = null;
+    try { if (t.unsub) t.unsub(); } catch (e) { /* ignore */ }
+    try { if (t.proc) { t.proc.onaudioprocess = null; t.proc.disconnect(); } } catch (e) { /* ignore */ }
+    try { if (t.node) t.node.disconnect(); } catch (e) { /* ignore */ }
+    try { if (t.silent) t.silent.disconnect(); } catch (e) { /* ignore */ }
+    if (t.stream) t.stream.getTracks().forEach((k) => k.stop());
+    this._schedule();
+  }
+
+  _camError(id, msg) {
+    this._cam[id] = { ...(this._cam[id] || {}), error: msg };
+    this._schedule();
   }
 
   _settingsView() {
@@ -852,7 +1349,7 @@ class RamsHomePanel extends HTMLElement {
 }
 
 const STYLES = `
-:host{display:block;container-type:inline-size;container-name:rams;min-height:100vh}
+:host{display:block;position:relative;container-type:inline-size;container-name:rams;min-height:100vh}
 *{box-sizing:border-box}
 .wrap{--ground:#E9E7E2;--surface:#F4F3EF;--raised:#FBFAF7;--ink:#1C1C1A;--ink2:#5E5C57;--ink3:#6B6964;--navfg:#4A4844;--well:#E3E0DA;--pressed:#E6E4DE;--ledoff:#CFCBC3;--line:#D6D3CC;--track:#E1DED7;--night:#A9A59D;--rain:#3E5C76;--sunk:#EDEBE6;--line2:#E6E3DC;--muted:#8A8780;--hl:#FFFFFF;--sh:28,28,26;
   --raise:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.08),0 6px 16px rgba(var(--sh),.08);
@@ -999,9 +1496,49 @@ input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px}
 .swatch{width:44px;height:44px;border-radius:22px;box-shadow:var(--raise)}
 .swatch.sel{outline:2px solid var(--ink);outline-offset:3px}
 .cams{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:24px;margin-top:24px}
-.cam{border-radius:28px;overflow:hidden;background:var(--surface);box-shadow:var(--card);text-align:left;display:flex;flex-direction:column}
-.cam img,.camph{width:100%;aspect-ratio:16/9;object-fit:cover;background:var(--well);display:flex;align-items:center;justify-content:center;color:var(--ink3)}
-.camlabel{padding:16px 20px;display:flex;justify-content:space-between;font-weight:500}
+.camcard{border-radius:28px;overflow:hidden;background:var(--surface);box-shadow:var(--card);display:flex;flex-direction:column}
+.camview{position:relative;aspect-ratio:16/9;background:#111110;overflow:hidden}
+.still{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.still.contain{object-fit:contain}
+.camph{display:flex;align-items:center;justify-content:center;background:var(--well);color:var(--ink3)}
+.camslot{position:absolute;inset:0;z-index:1;background:#000;display:flex;align-items:center;justify-content:center}
+.layer{position:absolute;top:0;left:0;width:0;height:0}
+.liveframe{position:absolute;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.liveframe ha-camera-stream{display:block;width:100%}
+.livebadge,.statpill{position:absolute;top:14px;z-index:2;display:flex;align-items:center;gap:8px;height:28px;padding:0 11px;border-radius:14px;background:rgba(20,20,19,.55);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);color:#fff;font-size:12px;font-weight:500;letter-spacing:.02em}
+.livebadge{left:14px}
+.livedot{width:8px;height:8px;border-radius:4px;background:#F0452B;box-shadow:0 0 0 3px rgba(240,69,43,.3)}
+.statpill{right:14px;gap:12px;--boltgap:#2B2B29}
+.pillpart{display:flex;align-items:center;gap:6px}
+.pillpart.low{color:#FF7A66}
+.glyph{display:block;flex-shrink:0}
+.cambtn{position:absolute;bottom:14px;z-index:2;width:44px;height:44px;border-radius:22px;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 2px rgba(0,0,0,.2),0 6px 16px rgba(0,0,0,.18)}
+.cambtn.play{left:14px;background:rgba(251,250,247,.94);color:#1C1C1A}
+.cambtn.full{right:14px;background:rgba(20,20,19,.55);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);color:#fff}
+.cambtn:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.spin{position:absolute;left:50%;top:50%;z-index:2;width:36px;height:36px;margin:-18px 0 0 -18px;border-radius:18px;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:rot .9s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+.camlabel{padding:16px 20px;display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-weight:500}
+
+/* Camera full screen */
+.camfull{--surface:#1D1D1B;--raised:#272725;--ink:#ECEAE5;--ink2:#A6A39C;--ink3:#9D9A93;--well:#101010;--pressed:#151514;--line:#3A3935;--line2:#31302D;--hl:rgba(255,255,255,.05);--sh:0,0,0;
+  position:fixed;inset:0;z-index:20;display:grid;grid-template-columns:minmax(0,1fr) 400px;background:#0B0B0A;color:var(--ink)}
+.cf-stage{position:relative;min-height:0;background:#000;--video-max-height:100vh;--video-max-height:100dvh}
+.cf-panel{background:var(--surface);padding:32px;display:flex;flex-direction:column;gap:28px;overflow-y:auto}
+.cf-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.cf-head h2{font-size:30px}
+.cf-controls{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.cfbtn{display:flex;flex-direction:column;align-items:center;gap:10px;font-size:13px;font-weight:500;color:var(--ink2)}
+.cfface{width:64px;height:64px;border-radius:32px;display:flex;align-items:center;justify-content:center;background:var(--raised);box-shadow:var(--raise);color:var(--ink);transition:background-color .2s,color .2s}
+.cfbtn.on .cfface{background:var(--accent);color:#fff;box-shadow:var(--press)}
+.cfbtn.on{color:var(--ink)}
+.cfbtn.talk .cfface{animation:talk 1.6s ease-out infinite}
+@keyframes talk{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 55%,transparent)}100%{box-shadow:0 0 0 16px transparent}}
+.cf-err{color:#FF7A66}
+.cf-rows{display:flex;flex-direction:column;border-top:1px solid var(--line2)}
+.cf-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--line2)}
+.cf-val{display:flex;align-items:center;gap:10px;font-weight:500;text-align:right}
+@media (prefers-reduced-motion: reduce){.spin{animation-duration:2.4s}.cfbtn.talk .cfface{animation:none;box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 40%,transparent)}}
 
 /* Sheet */
 .scrim{position:fixed;inset:0;background:rgba(var(--sh),.28);z-index:10}
@@ -1015,6 +1552,12 @@ input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px}
 /* Compact layout for phones and narrow windows */
 @container rams (max-width: 1100px){
   .home{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"clock mode" "clock off" "wx wx"}
+}
+@container rams (max-width: 900px){
+  .camfull{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);padding-top:env(safe-area-inset-top)}
+  .cf-stage{aspect-ratio:16/9;--video-max-height:none}
+  .cf-panel{padding:20px 20px calc(20px + env(safe-area-inset-bottom));gap:20px}
+  .cf-head h2{font-size:24px}
 }
 @container rams (max-width: 760px){
   .shell{grid-template-columns:minmax(0,1fr);grid-template-areas:"header" "rooms" "main";padding:20px 16px 108px;row-gap:16px}

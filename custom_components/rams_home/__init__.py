@@ -13,6 +13,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
+from . import camera_audio
 from .const import (
     CONF_ALARM,
     CONF_PERSONS,
@@ -48,6 +49,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             )
 
     hass.services.async_register(DOMAIN, "all_off", handle_all_off)
+    camera_audio.async_register(hass)
     return True
 
 
