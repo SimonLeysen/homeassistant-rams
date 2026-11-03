@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.4.1";
+const RAMS_VERSION = "0.4.2";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -21,6 +21,8 @@ const ICONS = {
   bell: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   power: '<path d="M12 4v8"/><path d="M7.05 7.05a7 7 0 1 0 9.9 0"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  back: '<path d="M14.5 5.5 8 12l6.5 6.5"/>',
+  chevron: '<path d="M9.5 6 15.5 12l-6 6"/>',
   minus: '<path d="M6 12h12"/>',
   plus: '<path d="M6 12h12M12 6v12"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
@@ -337,9 +339,11 @@ class RamsHomePanel extends HTMLElement {
       case "ask-off": ui.confirm = true; break;
       case "cancel-off": ui.confirm = false; break;
       case "all-off": ui.confirm = false; this._call("rams_home", "all_off", {}); break;
-      case "room": ui.sheet = id; break;
+      case "room": ui.sheet = id; ui.sheetBack = null; break;
       case "notifications": ui.sheet = "notifications"; break;
-      case "close": ui.sheet = null; break;
+      case "close": ui.sheet = null; ui.sheetBack = null; break;
+      case "light-open": ui.sheetBack = ui.sheet && !String(ui.sheet).startsWith("light:") ? ui.sheet : null; ui.sheet = "light:" + id; break;
+      case "sheet-back": ui.sheet = ui.sheetBack; ui.sheetBack = null; break;
       case "toggle": this._call("light", "toggle", { entity_id: id }); return;
       case "room-toggle": {
         const ids = this._lightsIn(id).filter((l) => this._hass.states[l] && this._hass.states[l].state !== "unavailable");
@@ -692,15 +696,40 @@ class RamsHomePanel extends HTMLElement {
     const unavailable = st.state === "unavailable" || st.state === "unknown";
     const dim = this._dimmable(st);
     const name = esc(this._name(id));
-    const status = unavailable ? "Unavailable" : on ? (dim ? this._pct(st) + "%" : "On") : "Off";
+    const status = unavailable ? "Unavailable" : on ? (dim ? this._pct(st) + "% brightness" : "On") : "Off";
     return `
-      <div class="lightrow ${on ? "on" : ""}">
-        <button class="lr-hit" data-act="toggle" data-id="${esc(id)}" aria-pressed="${on}" aria-label="${name}, ${on ? "on" : "off"}" ${unavailable ? "disabled" : ""}>
+      <div class="lightrow row">
+        <button class="lr-hit" data-act="light-open" data-id="${esc(id)}" aria-label="${name}, ${status}. Open settings">
           <span class="stack tight"><span class="lname">${name}</span><span class="caption">${status}</span></span>
-          <span class="led ${on ? "lit" : ""}" aria-hidden="true"></span>
+          ${icon("chevron", 18)}
         </button>
+        <button class="switch ${on ? "on" : ""}" data-act="toggle" data-id="${esc(id)}" aria-pressed="${on}" aria-label="${on ? "Turn off" : "Turn on"} ${name}" ${unavailable ? "disabled" : ""}><span></span></button>
+      </div>`;
+  }
+
+  // One light inside the light panel: switch plus brightness slider when it can dim.
+  _lightControl(id, main) {
+    const st = this._st(id);
+    if (!st) return "";
+    const on = st.state === "on";
+    const unavailable = st.state === "unavailable" || st.state === "unknown";
+    const dim = this._dimmable(st);
+    const name = esc(this._name(id));
+    const status = unavailable ? "Unavailable" : on ? (dim ? this._pct(st) + "% brightness" : "On") : "Off";
+    return `
+      <div class="lightrow ctl ${main ? "main" : ""}">
+        <div class="lr-top">
+          <div class="stack tight"><span class="${main ? "eyebrow" : "lname"}">${main ? (this._members(id).length ? "Whole group" : "Brightness") : name}</span><span class="caption">${status}</span></div>
+          <button class="switch ${on ? "on" : ""}" data-act="toggle" data-id="${esc(id)}" aria-pressed="${on}" aria-label="${on ? "Turn off" : "Turn on"} ${name}" ${unavailable ? "disabled" : ""}><span></span></button>
+        </div>
         ${dim && !unavailable ? `<input class="${on ? "" : "off"}" type="range" min="1" max="100" value="${on ? this._pct(st) : 1}" data-act="bri" data-id="${esc(id)}" aria-label="${name} brightness">` : ""}
       </div>`;
+  }
+
+  _members(id) {
+    const st = this._hass.states[id];
+    const list = st && Array.isArray(st.attributes.entity_id) ? st.attributes.entity_id : [];
+    return list.filter((m) => m.startsWith("light.") && this._hass.states[m]);
   }
 
   _roomSwitch(areaId, name) {
@@ -1429,6 +1458,14 @@ class RamsHomePanel extends HTMLElement {
           <div class="lr-top"><span class="lname">${esc(n.title || "Notification")}</span><button class="link" data-act="dismiss" data-id="${esc(n.notification_id)}">Dismiss</button></div>
           <span class="caption pre">${esc(n.message)}</span>
         </div>`).join("") : `<p class="caption">No notifications.</p>`;
+    } else if (String(id).startsWith("light:")) {
+      const lid = id.slice(6);
+      if (!this._st(lid)) return "";
+      const members = this._members(lid);
+      eyebrow = members.length ? "Light group" : "Light"; title = this._name(lid);
+      body = `
+        ${this._lightControl(lid, true)}
+        ${members.length ? `<div class="cardtop"><span class="eyebrow">Lamps in this group</span></div>${members.map((m) => this._lightControl(m, false)).join("")}` : ""}`;
     } else {
       const area = (this._hass.areas || {})[id];
       if (!area) return "";
@@ -1446,7 +1483,8 @@ class RamsHomePanel extends HTMLElement {
       <div class="sheet" role="dialog" aria-label="${esc(title)}">
         <span class="grabber" aria-hidden="true"></span>
         <div class="sheet-head">
-          <div class="stack tight"><span class="eyebrow">${eyebrow}</span><h2>${esc(title)}</h2></div>
+          ${this._ui.sheetBack ? `<button class="iconbtn flat back" data-act="sheet-back" aria-label="Back">${icon("back", 20)}</button>` : ""}
+          <div class="stack tight grow"><span class="eyebrow">${eyebrow}</span><h2>${esc(title)}</h2></div>
           <button class="iconbtn" data-act="close" aria-label="Close">${icon("close", 20)}</button>
         </div>
         <div class="sheet-body">${body}</div>
@@ -1576,11 +1614,18 @@ h1{font-size:32px;letter-spacing:-.01em}
 .viewtitle{font-size:24px;margin:0 0 20px}
 .list{gap:12px}
 .lightrow{background:var(--raised);border-radius:20px;display:flex;flex-direction:column;box-shadow:inset 0 1px 0 var(--hl),0 1px 2px rgba(var(--sh),.06);transition:box-shadow .2s}
-.lr-hit{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;min-height:64px;padding:14px 18px;text-align:left;border-radius:20px}
+.lightrow.row{flex-direction:row;align-items:center;padding-right:18px}
+.lr-hit{display:flex;align-items:center;gap:12px;flex:1;min-width:0;min-height:64px;padding:14px 12px 14px 18px;text-align:left;border-radius:20px}
+.lr-hit .stack{flex:1;min-width:0}
+.lr-hit .ic{color:var(--ink3)}
 .lr-hit:active{box-shadow:var(--press)}
 .lr-hit:focus-visible{outline-offset:-2px}
-.lightrow input[type=range]{margin:-4px 0 0;padding:0 18px 14px;box-sizing:content-box;width:calc(100% - 36px)}
+.lightrow.ctl{padding:16px 18px;gap:12px}
+.lightrow.ctl.main{padding:20px}
+.lightrow input[type=range]{margin:0}
 .lightrow input[type=range].off{opacity:.45}
+.sheet-head .grow{flex:1}
+.sheet-head .back{margin:-4px 8px 0 -8px}
 .lr-top{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .lr-top.line{padding:10px 0;border-bottom:1px solid var(--line2)}
 .lname{font-size:16px;font-weight:500}
