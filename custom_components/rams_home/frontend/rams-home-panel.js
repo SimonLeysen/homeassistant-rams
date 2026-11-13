@@ -3,7 +3,7 @@
  * A self contained web component: no build step, no external libraries.
  */
 
-const RAMS_VERSION = "0.4.4";
+const RAMS_VERSION = "0.4.5";
 // Heating: a target below COMFORT_MIN counts as frost protection, so the radiator shows as Off.
 const COMFORT_MIN = 12;
 // Target steps for the plus and minus buttons, whatever step the thermostat reports.
@@ -372,12 +372,17 @@ class RamsHomePanel extends HTMLElement {
         this._queueTarget(id, this._startTarget(st));
         break;
       }
-      case "heat-off": {
-        this._dropPend(id);
-        const p = this._pend[id] = { on: false, sent: true };
-        this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: "off" })
-          .catch(() => { if (this._pend[id] === p) { this._dropPend(id); this._schedule(); } });
-        p.guard = setTimeout(() => { if (this._pend[id] === p) { delete this._pend[id]; this._schedule(); } }, CONFIRM_TIMEOUT);
+      case "heat-off": this._heatOff(id); break;
+      case "room-all": {
+        const { lights, cl, active } = this._roomState(id);
+        if (active) {
+          const on = lights.filter((l) => this._hass.states[l].state === "on");
+          if (on.length) this._call("light", "turn_off", { entity_id: on });
+          if (cl && this._view(cl, this._hass.states[cl]).on) this._heatOff(cl);
+        } else {
+          if (lights.length) this._call("light", "turn_on", { entity_id: lights });
+          if (cl) this._queueTarget(cl, this._startTarget(this._hass.states[cl]));
+        }
         break;
       }
       case "alarm": this._call("alarm_control_panel", val, { entity_id: id }); return;
@@ -779,6 +784,24 @@ class RamsHomePanel extends HTMLElement {
       .catch(() => { if (this._pend[id] === p) { this._dropPend(id); this._schedule(); } });
     p.guard = setTimeout(() => { if (this._pend[id] === p) { delete this._pend[id]; this._schedule(); } }, CONFIRM_TIMEOUT);
   }
+  _heatOff(id) {
+    this._dropPend(id);
+    const p = this._pend[id] = { on: false, sent: true };
+    this._call("climate", "set_hvac_mode", { entity_id: id, hvac_mode: "off" })
+      .catch(() => { if (this._pend[id] === p) { this._dropPend(id); this._schedule(); } });
+    p.guard = setTimeout(() => { if (this._pend[id] === p) { delete this._pend[id]; this._schedule(); } }, CONFIRM_TIMEOUT);
+  }
+
+  // Usable lights and heating of a room, and whether anything in it is on.
+  _roomState(area) {
+    const ok = (e) => this._hass.states[e] && !["unavailable", "unknown"].includes(this._hass.states[e].state);
+    const lights = this._lightsIn(area).filter(ok);
+    const c = this._climateIn(area);
+    const cl = c && ok(c) ? c : null;
+    const active = lights.some((l) => this._hass.states[l].state === "on") || (!!cl && this._view(cl, this._hass.states[cl]).on);
+    return { lights, cl, active };
+  }
+
   _dropPend(id) {
     const p = this._pend[id];
     if (!p) return;
@@ -1459,7 +1482,7 @@ class RamsHomePanel extends HTMLElement {
   _sheet() {
     const id = this._ui.sheet;
     if (!id) return "";
-    let title, eyebrow, body;
+    let title, eyebrow, body, roomAll = "";
     if (id === "notifications") {
       eyebrow = "Inbox"; title = "Notifications";
       const list = Object.values(this._notifications);
@@ -1480,6 +1503,11 @@ class RamsHomePanel extends HTMLElement {
       const area = (this._hass.areas || {})[id];
       if (!area) return "";
       eyebrow = "Room"; title = area.name;
+      const rs = this._roomState(id);
+      if (rs.lights.length || rs.cl) {
+        const what = rs.cl && rs.lights.length ? "lights and heating" : rs.cl ? "heating" : "lights";
+        roomAll = `<button class="switch ${rs.active ? "on" : ""}" data-act="room-all" data-id="${esc(id)}" aria-pressed="${rs.active}" aria-label="${rs.active ? "Turn off" : "Turn on"} all ${what} in ${esc(area.name)}"><span></span></button>`;
+      }
       const cl = this._climateIn(id);
       const lights = this._lightsIn(id);
       const on = lights.filter((l) => this._st(l) && this._hass.states[l].state === "on").length;
@@ -1495,6 +1523,7 @@ class RamsHomePanel extends HTMLElement {
         <div class="sheet-head">
           ${this._ui.sheetBack ? `<button class="iconbtn flat back" data-act="sheet-back" aria-label="Back">${icon("back", 20)}</button>` : ""}
           <div class="stack tight grow"><span class="eyebrow">${eyebrow}</span><h2>${esc(title)}</h2></div>
+          ${roomAll}
           <button class="iconbtn" data-act="close" aria-label="Close">${icon("close", 20)}</button>
         </div>
         <div class="sheet-body">${body}</div>
@@ -1637,6 +1666,7 @@ h1{font-size:32px;letter-spacing:-.01em}
 .lightrow input[type=range]{margin:0}
 .lightrow input[type=range].off{opacity:.45}
 .sheet-head .grow{flex:1}
+.sheet-head .switch{align-self:center;margin-right:16px}
 .sheet-head .back{margin:-4px 8px 0 -8px}
 .lr-top{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .lr-top.line{padding:10px 0;border-bottom:1px solid var(--line2)}
